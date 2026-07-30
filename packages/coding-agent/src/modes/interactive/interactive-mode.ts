@@ -52,6 +52,7 @@ import {
 	getDebugLogPath,
 	getDocsPath,
 	getShareViewerUrl,
+	isBunRuntime,
 	VERSION,
 } from "../../config.ts";
 import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.ts";
@@ -232,19 +233,136 @@ function quoteIfNeeded(value: string): string {
 	return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-export function formatResumeCommand(sessionManager: SessionManager): string | undefined {
-	if (!process.stdout.isTTY) return undefined;
+function getSessionResumeArgs(sessionManager: SessionManager): string[] | undefined {
 	if (!sessionManager.isPersisted()) return undefined;
 
 	const sessionFile = sessionManager.getSessionFile();
 	if (!sessionFile || !fs.existsSync(sessionFile)) return undefined;
 
-	const args = [APP_NAME];
+	const args: string[] = [];
 	if (!sessionManager.usesDefaultSessionDir()) {
-		args.push("--session-dir", quoteIfNeeded(sessionManager.getSessionDir()));
+		args.push("--session-dir", sessionManager.getSessionDir());
 	}
 	args.push("--session", sessionManager.getSessionId());
-	return args.join(" ");
+	return args;
+}
+
+export function formatResumeCommand(sessionManager: SessionManager): string | undefined {
+	if (!process.stdout.isTTY) return undefined;
+	const args = getSessionResumeArgs(sessionManager);
+	if (!args) return undefined;
+	return [APP_NAME, ...args.map(quoteIfNeeded)].join(" ");
+}
+
+export interface RestartRuntime {
+	execPath: string;
+	entrypoint: string | undefined;
+	env: NodeJS.ProcessEnv;
+	execve: NodeJS.Process["execve"];
+	platform: NodeJS.Platform;
+	isBunRuntime: boolean;
+	isFile: (file: string) => boolean;
+	isReadable: (file: string) => boolean;
+	isExecutable: (file: string) => boolean;
+	isSameFile: (left: string, right: string) => boolean;
+}
+
+export interface RestartInvocation {
+	executable: string;
+	args: string[];
+	env: NodeJS.ProcessEnv;
+	execve: NonNullable<NodeJS.Process["execve"]>;
+}
+
+export type RestartPreparation = { ok: true; invocation: RestartInvocation } | { ok: false; error: string };
+
+export function createRestartInvocation(
+	sessionManager: SessionManager,
+	runtime: RestartRuntime = {
+		execPath: process.execPath,
+		entrypoint: process.argv[1],
+		env: process.env,
+		execve: process.execve,
+		platform: process.platform,
+		isBunRuntime,
+		isFile: (file) => {
+			try {
+				return fs.statSync(file).isFile();
+			} catch {
+				return false;
+			}
+		},
+		isReadable: (file) => {
+			try {
+				fs.accessSync(file, fs.constants.R_OK);
+				return true;
+			} catch {
+				return false;
+			}
+		},
+		isExecutable: (file) => {
+			try {
+				fs.accessSync(file, fs.constants.X_OK);
+				return true;
+			} catch {
+				return false;
+			}
+		},
+		isSameFile: (left, right) => {
+			try {
+				const leftStats = fs.statSync(left);
+				const rightStats = fs.statSync(right);
+				return leftStats.dev === rightStats.dev && leftStats.ino === rightStats.ino;
+			} catch {
+				return false;
+			}
+		},
+	},
+): RestartPreparation {
+	if (!sessionManager.isPersisted()) {
+		return { ok: false, error: "The current session is not persisted and cannot be restarted." };
+	}
+
+	const resumeArgs = getSessionResumeArgs(sessionManager);
+	if (!resumeArgs) {
+		return { ok: false, error: "The current session file is unavailable and cannot be restarted." };
+	}
+	if (runtime.platform === "win32" || runtime.isBunRuntime || !runtime.execve) {
+		return { ok: false, error: "Process restart is not supported by this runtime. Use /quit and resume manually." };
+	}
+	if (!runtime.isFile(runtime.execPath) || !runtime.isExecutable(runtime.execPath)) {
+		return { ok: false, error: "Pi's runtime executable is unavailable. Use /quit and resume manually." };
+	}
+	if (!runtime.entrypoint || !runtime.isFile(runtime.entrypoint) || !runtime.isReadable(runtime.entrypoint)) {
+		return { ok: false, error: "Pi's executable entrypoint is unavailable. Use /quit and resume manually." };
+	}
+	if (runtime.isSameFile(runtime.execPath, runtime.entrypoint)) {
+		return { ok: false, error: "Standalone Pi executables cannot restart in place. Use /quit and resume manually." };
+	}
+	const sessionFile = sessionManager.getSessionFile();
+	if (!sessionFile || !runtime.isReadable(sessionFile)) {
+		return { ok: false, error: "The current session file is unavailable and cannot be restarted." };
+	}
+
+	return {
+		ok: true,
+		invocation: {
+			executable: runtime.execPath,
+			args: [runtime.execPath, runtime.entrypoint, ...resumeArgs],
+			env: runtime.env,
+			execve: runtime.execve,
+		},
+	};
+}
+
+export function executeRestart(invocation: RestartInvocation): never {
+	try {
+		return invocation.execve(invocation.executable, invocation.args, invocation.env);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		process.stderr.write(`Failed to restart ${APP_NAME}: ${message}\n`);
+		process.exit(1);
+	}
 }
 
 function hasDefaultModelProvider(providerId: string): providerId is keyof typeof defaultModelPerProvider {
@@ -2792,6 +2910,11 @@ export class InteractiveMode {
 				await this.handleReloadCommand();
 				return;
 			}
+			if (text === "/restart") {
+				this.editor.setText("");
+				await this.handleRestartCommand();
+				return;
+			}
 			if (text === "/debug") {
 				this.handleDebugCommand();
 				this.editor.setText("");
@@ -3584,7 +3707,7 @@ export class InteractiveMode {
 	 */
 	private isShuttingDown = false;
 
-	private async shutdown(options?: { fromSignal?: boolean }): Promise<void> {
+	private async shutdown(options?: { fromSignal?: boolean; restart?: () => never }): Promise<void> {
 		if (this.isShuttingDown) return;
 		this.isShuttingDown = true;
 		// Keep signal handlers registered until terminal cleanup has completed.
@@ -3616,6 +3739,10 @@ export class InteractiveMode {
 
 		this.stop();
 		await this.runtimeHost.dispose();
+
+		if (options?.restart) {
+			options.restart();
+		}
 
 		const resumeCommand = formatResumeCommand(this.sessionManager);
 		if (resumeCommand) {
@@ -5354,6 +5481,30 @@ export class InteractiveMode {
 	// =========================================================================
 	// Command handlers
 	// =========================================================================
+
+	private async handleRestartCommand(): Promise<void> {
+		if (this.session.isStreaming) {
+			this.showWarning("Wait for the current response to finish before restarting.");
+			return;
+		}
+		if (this.session.isCompacting) {
+			this.showWarning("Wait for compaction to finish before restarting.");
+			return;
+		}
+		if (this.session.isBashRunning) {
+			this.showWarning("Wait for the current bash command to finish before restarting.");
+			return;
+		}
+
+		const preparation = createRestartInvocation(this.sessionManager);
+		if (!preparation.ok) {
+			this.showError(preparation.error);
+			return;
+		}
+
+		const { invocation } = preparation;
+		await this.shutdown({ restart: () => executeRestart(invocation) });
+	}
 
 	private async handleReloadCommand(): Promise<void> {
 		if (this.session.isStreaming) {

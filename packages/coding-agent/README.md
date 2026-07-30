@@ -194,6 +194,7 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/import <file>` | Import and resume a session from a JSONL file |
 | `/share` | Upload as private GitHub gist with shareable HTML link |
 | `/reload` | Reload keybindings, extensions, skills, prompts, themes, and context files |
+| `/restart` | Restart the Node.js process and resume the current persisted session |
 | `/hotkeys` | Show all keyboard shortcuts |
 | `/changelog` | Display version history |
 | `/quit` | Quit pi |

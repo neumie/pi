@@ -55,9 +55,12 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/import <file>` | Import and resume a session from a JSONL file |
 | `/share` | Upload as private GitHub gist with shareable HTML link |
 | `/reload` | Reload keybindings, extensions, skills, prompts, themes, and context files |
+| `/restart` | Restart the Node.js process and resume the current persisted session |
 | `/hotkeys` | Show all keyboard shortcuts |
 | `/changelog` | Display version history |
 | `/quit` | Quit pi |
+
+`/restart` performs the same canonical resume as `pi --session <id>` after graceful terminal and extension cleanup. It intentionally does not replay one-shot startup prompts or preserve other CLI-only flags. The command requires a persisted session and a POSIX Node.js runtime launched through Pi's JavaScript entrypoint. Windows, Bun, standalone executables, and runtimes without in-place process replacement report an error without shutting down.
 
 ## Message Queue
 
