@@ -612,6 +612,18 @@ describe("ExtensionRunner", () => {
 			expect(missing).toBeUndefined();
 		});
 
+		it("uses the first transcript turn renderer in extension load order", async () => {
+			fs.writeFileSync(path.join(extensionsDir, "first-turn.ts"), `export default (pi) => pi.registerTranscriptTurnRenderer(() => null);`);
+			fs.writeFileSync(path.join(extensionsDir, "second-turn.ts"), `export default (pi) => pi.registerTranscriptTurnRenderer(() => undefined);`);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			const renderer = runner.getTranscriptTurnRenderer();
+
+			expect(renderer).toBeDefined();
+			expect(renderer?.({ messages: [], toolExecutions: [], isStreaming: false }, { expanded: false, outputPad: 0, showImages: false }, {} as never)).toBeNull();
+		});
+
 		it("gets entry renderer by type", async () => {
 			const extCode = `
 				export default function(pi) {

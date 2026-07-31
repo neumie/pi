@@ -1566,6 +1566,22 @@ Register a custom TUI renderer for custom messages with your `customType`. Custo
 
 Register a custom TUI renderer for custom entries with your `customType`. Custom entries are created with `pi.appendEntry()` and do not participate in LLM context.
 
+### pi.registerTranscriptTurnRenderer(renderer)
+
+Opt in to replacing the ordinary assistant and tool rows between user messages with one extension-owned component. The renderer receives the complete, mutable turn snapshot while streaming and again when it settles. It is TUI-only: it does not change session entries, model context, or non-TUI output. Pi keeps image content blocks outside the extension component and renders them through its native image component, preserving terminal image protocol ownership.
+
+Only the first registered turn renderer is used, in extension load order. On stock Pi versions that do not expose this API, extensions should feature-detect it and retain normal transcript rendering.
+
+```typescript
+import { Text } from "@earendil-works/pi-tui";
+
+pi.registerTranscriptTurnRenderer((turn, { expanded }, theme) => {
+  const tools = turn.toolExecutions.map((tool) => tool.toolName).join(", ");
+  const state = turn.isStreaming ? "working" : "done";
+  return new Text(theme.fg("muted", `${state}: ${tools || "no tools"}`), 0, 0);
+});
+```
+
 ```typescript
 import { Box, Text } from "@earendil-works/pi-tui";
 

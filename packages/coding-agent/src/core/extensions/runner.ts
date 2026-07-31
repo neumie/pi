@@ -43,6 +43,7 @@ import type {
 	MessageEndEventResult,
 	MessageRenderer,
 	ProjectTrustContext,
+	TranscriptTurnRenderer,
 	ProjectTrustEvent,
 	ProjectTrustEventResult,
 	ProviderConfig,
@@ -581,6 +582,13 @@ export class ExtensionRunner {
 			if (renderer) {
 				return renderer;
 			}
+		}
+		return undefined;
+	}
+
+	getTranscriptTurnRenderer(): TranscriptTurnRenderer | undefined {
+		for (const ext of this.extensions) {
+			if (ext.transcriptTurnRenderer) return ext.transcriptTurnRenderer;
 		}
 		return undefined;
 	}

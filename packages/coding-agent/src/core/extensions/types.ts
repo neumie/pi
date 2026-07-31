@@ -1143,6 +1143,45 @@ export interface EntryRenderOptions {
 	expanded: boolean;
 }
 
+/** A tool execution observed while rendering one transcript turn. */
+export interface TranscriptToolExecution {
+	toolCallId: string;
+	toolName: string;
+	args: unknown;
+	result?: { content: (TextContent | ImageContent)[]; isError: boolean };
+	isPartial: boolean;
+}
+
+/** The non-user output produced after one user message and before the next. */
+export interface TranscriptTurn {
+	messages: readonly AgentMessage[];
+	toolExecutions: readonly TranscriptToolExecution[];
+	/** True while Pi may append more assistant or tool output to this turn. */
+	isStreaming: boolean;
+}
+
+export interface TranscriptTurnRenderOptions {
+	expanded: boolean;
+	/** Horizontal padding configured by the outputPad setting. */
+	outputPad: number;
+	/** Whether Pi is configured to display inline images. */
+	showImages: boolean;
+}
+
+/**
+ * Renders all non-user output in a transcript turn as one component.
+ *
+ * Register at most one renderer across loaded extensions; Pi uses the first in
+ * extension load order. Pi preserves image content blocks as native image rows
+ * after the returned component, so renderers never need to emit image protocol
+ * sequences themselves.
+ */
+export type TranscriptTurnRenderer = (
+	turn: TranscriptTurn,
+	options: TranscriptTurnRenderOptions,
+	theme: Theme,
+) => Component | undefined;
+
 export type MessageRenderer<T = unknown> = (
 	message: CustomMessage<T>,
 	options: MessageRenderOptions,
@@ -1277,6 +1316,12 @@ export interface ExtensionAPI {
 
 	/** Register a custom renderer for CustomEntry. Custom entries do not participate in LLM context. */
 	registerEntryRenderer<T = unknown>(customType: string, renderer: EntryRenderer<T>): void;
+
+	/**
+	 * Replace ordinary assistant/tool transcript rows with one component per user turn.
+	 * The renderer is TUI-only; it does not alter sessions, model context, or other modes.
+	 */
+	registerTranscriptTurnRenderer(renderer: TranscriptTurnRenderer): void;
 
 	// =========================================================================
 	// Actions
@@ -1676,6 +1721,7 @@ export interface Extension {
 	tools: Map<string, RegisteredTool>;
 	messageRenderers: Map<string, MessageRenderer>;
 	entryRenderers?: Map<string, EntryRenderer>;
+	transcriptTurnRenderer?: TranscriptTurnRenderer;
 	commands: Map<string, RegisteredCommand>;
 	flags: Map<string, ExtensionFlag>;
 	shortcuts: Map<KeyId, ExtensionShortcut>;

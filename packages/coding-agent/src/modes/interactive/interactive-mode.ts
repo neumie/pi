@@ -143,6 +143,7 @@ import {
 	WorkingStatusIndicator,
 } from "./components/status-indicator.ts";
 import { ToolExecutionComponent } from "./components/tool-execution.ts";
+import { TranscriptTurnComponent } from "./components/transcript-turn.ts";
 import { TreeSelectorComponent } from "./components/tree-selector.ts";
 import { TrustSelectorComponent } from "./components/trust-selector.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
@@ -504,6 +505,13 @@ export class InteractiveMode {
 	// Streaming message tracking
 	private streamingComponent: AssistantMessageComponent | undefined = undefined;
 	private streamingMessage: AssistantMessage | undefined = undefined;
+
+	// Opt-in extension-owned transcript turn tracking.
+	private transcriptTurnComponent: TranscriptTurnComponent | undefined = undefined;
+	private transcriptTurnMessages: AgentMessage[] = [];
+	private transcriptToolExecutions = new Map<string, import("../../core/extensions/types.ts").TranscriptToolExecution>();
+	private transcriptAssistantIndex: number | undefined = undefined;
+	private transcriptTurnStreaming = true;
 
 	// Tool execution tracking: toolCallId -> component
 	private pendingTools = new Map<string, ToolExecutionComponent>();
@@ -3058,12 +3066,19 @@ export class InteractiveMode {
 				break;
 
 			case "message_start":
-				if (event.message.role === "custom") {
+				if (event.message.role === "custom" && this.transcriptTurnComponent) {
+					this.transcriptTurnMessages.push(event.message);
+					this.updateTranscriptTurn();
+					this.ui.requestRender();
+				} else if (event.message.role === "custom") {
 					this.addMessageToChat(event.message);
 					this.ui.requestRender();
 				} else if (event.message.role === "user") {
+					this.clearTranscriptTurn();
 					this.addMessageToChat(event.message);
 					this.updatePendingMessagesDisplay();
+					this.ui.requestRender();
+				} else if (event.message.role === "assistant" && this.startTranscriptAssistant(event.message)) {
 					this.ui.requestRender();
 				} else if (event.message.role === "assistant") {
 					this.streamingComponent = new AssistantMessageComponent(
@@ -3081,7 +3096,9 @@ export class InteractiveMode {
 				break;
 
 			case "message_update":
-				if (this.streamingComponent && event.message.role === "assistant") {
+				if (event.message.role === "assistant" && this.updateTranscriptAssistant(event.message)) {
+					this.ui.requestRender();
+				} else if (this.streamingComponent && event.message.role === "assistant") {
 					this.streamingMessage = event.message;
 					this.streamingComponent.updateContent(this.streamingMessage);
 
@@ -3117,7 +3134,9 @@ export class InteractiveMode {
 
 			case "message_end":
 				if (event.message.role === "user") break;
-				if (this.streamingComponent && event.message.role === "assistant") {
+				if (event.message.role === "assistant" && this.updateTranscriptAssistant(event.message)) {
+					this.ui.requestRender();
+				} else if (this.streamingComponent && event.message.role === "assistant") {
 					this.streamingMessage = event.message;
 					let errorMessage: string | undefined;
 					if (this.streamingMessage.stopReason === "aborted") {
@@ -3160,6 +3179,10 @@ export class InteractiveMode {
 				break;
 
 			case "tool_execution_start": {
+				if (this.updateTranscriptTool(event.toolCallId, event.toolName, event.args)) {
+					this.ui.requestRender();
+					break;
+				}
 				let component = this.pendingTools.get(event.toolCallId);
 				if (!component) {
 					component = new ToolExecutionComponent(
@@ -3184,6 +3207,10 @@ export class InteractiveMode {
 			}
 
 			case "tool_execution_update": {
+				if (this.updateTranscriptTool(event.toolCallId, event.toolName, event.args, event.partialResult, false, true)) {
+					this.ui.requestRender();
+					break;
+				}
 				const component = this.pendingTools.get(event.toolCallId);
 				if (component) {
 					component.updateResult({ ...event.partialResult, isError: false }, true);
@@ -3193,6 +3220,10 @@ export class InteractiveMode {
 			}
 
 			case "tool_execution_end": {
+				if (this.updateTranscriptTool(event.toolCallId, event.toolName, undefined, event.result, event.isError, false)) {
+					this.ui.requestRender();
+					break;
+				}
 				const component = this.pendingTools.get(event.toolCallId);
 				if (component) {
 					component.updateResult({ ...event.result, isError: event.isError });
@@ -3203,6 +3234,7 @@ export class InteractiveMode {
 			}
 
 			case "agent_end":
+				this.setTranscriptTurnStreaming(false);
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(false);
 				}
@@ -3366,6 +3398,81 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
+	private getTranscriptTurnRenderer() {
+		return this.session.extensionRunner.getTranscriptTurnRenderer();
+	}
+
+	private clearTranscriptTurn(): void {
+		this.transcriptTurnComponent = undefined;
+		this.transcriptTurnMessages = [];
+		this.transcriptToolExecutions.clear();
+		this.transcriptAssistantIndex = undefined;
+		this.transcriptTurnStreaming = true;
+	}
+
+	private updateTranscriptTurn(): boolean {
+		if (!this.transcriptTurnComponent) return false;
+		this.transcriptTurnComponent.update({
+			messages: this.transcriptTurnMessages,
+			toolExecutions: [...this.transcriptToolExecutions.values()],
+			isStreaming: this.transcriptTurnStreaming,
+		});
+		return true;
+	}
+
+	private startTranscriptAssistant(message: AgentMessage): boolean {
+		const renderer = this.getTranscriptTurnRenderer();
+		if (!renderer) return false;
+		if (!this.transcriptTurnComponent) {
+			this.transcriptTurnComponent = new TranscriptTurnComponent(
+				renderer,
+				this.outputPad,
+				this.settingsManager.getShowImages(),
+				this.settingsManager.getImageWidthCells(),
+			);
+			this.chatContainer.addChild(this.transcriptTurnComponent);
+		}
+		this.transcriptTurnStreaming = true;
+		this.transcriptAssistantIndex = this.transcriptTurnMessages.length;
+		this.transcriptTurnMessages.push(message);
+		return this.updateTranscriptTurn();
+	}
+
+	private updateTranscriptAssistant(message: AgentMessage): boolean {
+		if (!this.transcriptTurnComponent || this.transcriptAssistantIndex === undefined) return false;
+		this.transcriptTurnMessages[this.transcriptAssistantIndex] = message;
+		return this.updateTranscriptTurn();
+	}
+
+	private updateTranscriptTool(
+		toolCallId: string,
+		toolName: string,
+		args: unknown,
+		result?: unknown,
+		isError = false,
+		isPartial = false,
+	): boolean {
+		if (!this.transcriptTurnComponent) return false;
+		const previous = this.transcriptToolExecutions.get(toolCallId);
+		const content = result && typeof result === "object" && Array.isArray((result as { content?: unknown }).content)
+			? ((result as { content: Array<import("@earendil-works/pi-ai").TextContent | import("@earendil-works/pi-ai").ImageContent> }).content as never)
+			: undefined;
+		this.transcriptToolExecutions.set(toolCallId, {
+			toolCallId,
+			toolName,
+			args: args ?? previous?.args,
+			result: content ? { content, isError } : previous?.result,
+			isPartial,
+		});
+		return this.updateTranscriptTurn();
+	}
+
+	private setTranscriptTurnStreaming(isStreaming: boolean): void {
+		if (!this.transcriptTurnComponent) return;
+		this.transcriptTurnStreaming = isStreaming;
+		this.updateTranscriptTurn();
+	}
+
 	private addCustomEntryToChat(entry: Extract<SessionEntry, { type: "custom" }>): void {
 		const renderer = this.session.extensionRunner.getEntryRenderer(entry.customType);
 		if (!renderer) {
@@ -3492,10 +3599,62 @@ export class InteractiveMode {
 		}
 	}
 
+	private renderTranscriptTurnItems(
+		items: readonly RenderSessionItem[],
+		options: { updateFooter?: boolean; populateHistory?: boolean },
+	): void {
+		const renderer = this.getTranscriptTurnRenderer();
+		if (!renderer) return;
+		this.pendingTools.clear();
+		this.clearTranscriptTurn();
+		for (const item of items) {
+			if (isCustomSessionEntry(item)) {
+				this.addCustomEntryToChat(item);
+				continue;
+			}
+			if (item.role === "user") {
+				this.clearTranscriptTurn();
+				this.addMessageToChat(item, options);
+				continue;
+			}
+			if (!this.transcriptTurnComponent) {
+				this.transcriptTurnComponent = new TranscriptTurnComponent(
+					renderer,
+					this.outputPad,
+					this.settingsManager.getShowImages(),
+					this.settingsManager.getImageWidthCells(),
+				);
+				this.chatContainer.addChild(this.transcriptTurnComponent);
+			}
+			this.transcriptTurnMessages.push(item);
+			if (item.role === "assistant") {
+				for (const content of item.content) {
+					if (content.type === "toolCall") {
+						this.transcriptToolExecutions.set(content.id, {
+							toolCallId: content.id,
+							toolName: content.name,
+							args: content.arguments,
+							isPartial: false,
+						});
+					}
+				}
+			} else if (item.role === "toolResult") {
+				this.updateTranscriptTool(item.toolCallId, item.toolName, undefined, item, item.isError, false);
+			}
+			this.updateTranscriptTurn();
+		}
+		this.setTranscriptTurnStreaming(false);
+		this.ui.requestRender();
+	}
+
 	private renderSessionItems(
 		items: readonly RenderSessionItem[],
 		options: { updateFooter?: boolean; populateHistory?: boolean } = {},
 	): void {
+		if (this.getTranscriptTurnRenderer()) {
+			this.renderTranscriptTurnItems(items, options);
+			return;
+		}
 		this.pendingTools.clear();
 		const renderedPendingTools = new Map<string, ToolExecutionComponent>();
 		// Cache-miss notices are not persisted; re-derive them from the full entry

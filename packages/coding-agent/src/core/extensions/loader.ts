@@ -40,6 +40,7 @@ import type {
 	LoadExtensionsResult,
 	MessageRenderer,
 	ProviderConfig,
+	TranscriptTurnRenderer,
 	RegisteredCommand,
 	ToolDefinition,
 } from "./types.ts";
@@ -293,6 +294,11 @@ function createExtensionAPI(
 			runtime.assertActive();
 			extension.entryRenderers ??= new Map();
 			extension.entryRenderers.set(customType, renderer as EntryRenderer);
+		},
+
+		registerTranscriptTurnRenderer(renderer: TranscriptTurnRenderer): void {
+			runtime.assertActive();
+			extension.transcriptTurnRenderer = renderer;
 		},
 
 		// Flag access - checks extension registered it, reads from runtime
