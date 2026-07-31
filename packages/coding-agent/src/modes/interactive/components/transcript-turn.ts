@@ -1,10 +1,11 @@
 import type { Component } from "@earendil-works/pi-tui";
-import { Container, getCapabilities, Image, Spacer } from "@earendil-works/pi-tui";
+import { Container, getCapabilities, Image, Spacer, type TUI } from "@earendil-works/pi-tui";
 import type {
 	TranscriptToolExecution,
 	TranscriptTurn,
 	TranscriptTurnRenderer,
 } from "../../../core/extensions/types.ts";
+import { convertToPng } from "../../../utils/image-convert.ts";
 import { theme } from "../theme/theme.ts";
 
 /**
@@ -21,13 +22,16 @@ export class TranscriptTurnComponent extends Container {
 	private readonly outputPad: number;
 	private readonly showImages: boolean;
 	private readonly imageWidthCells: number;
+	private readonly ui: TUI;
+	private convertedImages = new Map<string, { data: string; mimeType: string }>();
 
-	constructor(renderer: TranscriptTurnRenderer, outputPad: number, showImages: boolean, imageWidthCells: number) {
+	constructor(renderer: TranscriptTurnRenderer, outputPad: number, showImages: boolean, imageWidthCells: number, ui: TUI) {
 		super();
 		this.renderer = renderer;
 		this.outputPad = outputPad;
 		this.showImages = showImages;
 		this.imageWidthCells = imageWidthCells;
+		this.ui = ui;
 	}
 
 	update(turn: TranscriptTurn): void {
@@ -66,13 +70,24 @@ export class TranscriptTurnComponent extends Container {
 
 		if (!this.showImages || !getCapabilities().images) return;
 		for (const execution of this.toolExecutions) {
-			for (const content of execution.result?.content ?? []) {
+			for (const [index, content] of (execution.result?.content ?? []).entries()) {
 				if (content.type !== "image" || !content.data || !content.mimeType) continue;
+				const key = `${execution.toolCallId}:${index}`;
+				let image = this.convertedImages.get(key) ?? content;
+				if (getCapabilities().images === "kitty" && image.mimeType !== "image/png") {
+					convertToPng(content.data, content.mimeType).then((converted) => {
+						if (!converted) return;
+						this.convertedImages.set(key, converted);
+						this.rebuild();
+						this.ui.requestRender();
+					});
+					continue;
+				}
 				this.addChild(new Spacer(1));
 				this.addChild(
 					new Image(
-						content.data,
-						content.mimeType,
+						image.data,
+						image.mimeType,
 						{ fallbackColor: (text: string) => theme.fg("toolOutput", text) },
 						{ maxWidthCells: this.imageWidthCells },
 					),

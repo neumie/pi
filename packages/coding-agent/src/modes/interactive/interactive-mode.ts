@@ -3429,6 +3429,7 @@ export class InteractiveMode {
 				this.outputPad,
 				this.settingsManager.getShowImages(),
 				this.settingsManager.getImageWidthCells(),
+				this.ui,
 			);
 			this.chatContainer.addChild(this.transcriptTurnComponent);
 		}
@@ -3623,6 +3624,7 @@ export class InteractiveMode {
 					this.outputPad,
 					this.settingsManager.getShowImages(),
 					this.settingsManager.getImageWidthCells(),
+					this.ui,
 				);
 				this.chatContainer.addChild(this.transcriptTurnComponent);
 			}

@@ -13,6 +13,7 @@ describe("TranscriptTurnComponent", () => {
 			1,
 			false,
 			60,
+			{ requestRender() {} } as never,
 		);
 
 		component.update({ messages: [], toolExecutions: [], isStreaming: true });
