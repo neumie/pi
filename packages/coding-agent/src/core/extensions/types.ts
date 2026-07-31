@@ -1154,7 +1154,10 @@ export interface TranscriptToolExecution {
 
 /** The non-user output produced after one user message and before the next. */
 export interface TranscriptTurn {
+	/** Visible agent messages. Hidden custom messages are never included. */
 	messages: readonly AgentMessage[];
+	/** Visible custom session entries with registered entry renderers. */
+	customEntries: readonly CustomEntry[];
 	toolExecutions: readonly TranscriptToolExecution[];
 	/** True while Pi may append more assistant or tool output to this turn. */
 	isStreaming: boolean;
@@ -1169,12 +1172,15 @@ export interface TranscriptTurnRenderOptions {
 }
 
 /**
- * Renders all non-user output in a transcript turn as one component.
+ * Renders all visible non-user output in a transcript turn as one component.
+ * This includes displayed custom messages and custom entries that have entry
+ * renderers; hidden and state-only custom data is never supplied.
  *
  * Register at most one renderer across loaded extensions; Pi uses the first in
  * extension load order. Pi preserves image content blocks as native image rows
  * after the returned component, so renderers never need to emit image protocol
- * sequences themselves.
+ * sequences themselves. If a renderer throws, Pi reports the failure, falls
+ * back to default assistant/tool rows, and still renders native images.
  */
 export type TranscriptTurnRenderer = (
 	turn: TranscriptTurn,

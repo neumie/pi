@@ -1,5 +1,5 @@
 import type { Component } from "@earendil-works/pi-tui";
-import { Container, getCapabilities, Image, Spacer, type TUI } from "@earendil-works/pi-tui";
+import { Container, getCapabilities, Image, Spacer, Text, type TUI } from "@earendil-works/pi-tui";
 import type {
 	TranscriptToolExecution,
 	TranscriptTurn,
@@ -8,6 +8,26 @@ import type {
 import { convertToPng } from "../../../utils/image-convert.ts";
 import { theme } from "../theme/theme.ts";
 
+type ConvertedImage = {
+	sourceData: string;
+	sourceMimeType: string;
+	data: string;
+	mimeType: string;
+};
+
+type ImageConversion = {
+	sourceData: string;
+	sourceMimeType: string;
+	status: "pending" | "failed";
+};
+
+type CachedImageComponent = {
+	data: string;
+	mimeType: string;
+	maxWidthCells: number;
+	component: Image;
+};
+
 /**
  * Host-owned shell for an extension-rendered transcript turn. It deliberately
  * keeps images outside extension output so terminal image protocols remain
@@ -15,27 +35,42 @@ import { theme } from "../theme/theme.ts";
  */
 export class TranscriptTurnComponent extends Container {
 	private messages: TranscriptTurn["messages"] = [];
+	private customEntries: TranscriptTurn["customEntries"] = [];
 	private toolExecutions: readonly TranscriptToolExecution[] = [];
 	private isStreaming = true;
 	private expanded = false;
 	private readonly renderer: TranscriptTurnRenderer;
-	private readonly outputPad: number;
-	private readonly showImages: boolean;
-	private readonly imageWidthCells: number;
+	private readonly fallbackRenderer: TranscriptTurnRenderer | undefined;
+	private outputPad: number;
+	private showImages: boolean;
+	private imageWidthCells: number;
 	private readonly ui: TUI;
-	private convertedImages = new Map<string, { data: string; mimeType: string }>();
+	private readonly convertedImages = new Map<string, ConvertedImage>();
+	private readonly imageConversions = new Map<string, ImageConversion>();
+	private readonly imageComponents = new Map<string, CachedImageComponent>();
 
-	constructor(renderer: TranscriptTurnRenderer, outputPad: number, showImages: boolean, imageWidthCells: number, ui: TUI) {
+	constructor(
+		renderer: TranscriptTurnRenderer,
+		outputPad: number,
+		showImages: boolean,
+		imageWidthCells: number,
+		ui: TUI,
+		expanded = false,
+		fallbackRenderer?: TranscriptTurnRenderer,
+	) {
 		super();
 		this.renderer = renderer;
+		this.fallbackRenderer = fallbackRenderer;
 		this.outputPad = outputPad;
 		this.showImages = showImages;
 		this.imageWidthCells = imageWidthCells;
 		this.ui = ui;
+		this.expanded = expanded;
 	}
 
 	update(turn: TranscriptTurn): void {
 		this.messages = turn.messages;
+		this.customEntries = turn.customEntries;
 		this.toolExecutions = turn.toolExecutions;
 		this.isStreaming = turn.isStreaming;
 		this.rebuild();
@@ -47,52 +82,149 @@ export class TranscriptTurnComponent extends Container {
 		this.rebuild();
 	}
 
+	setOutputPad(outputPad: number): void {
+		if (this.outputPad === outputPad) return;
+		this.outputPad = outputPad;
+		this.rebuild();
+	}
+
+	setShowImages(showImages: boolean): void {
+		if (this.showImages === showImages) return;
+		this.showImages = showImages;
+		this.rebuild();
+	}
+
+	setImageWidthCells(imageWidthCells: number): void {
+		const nextWidth = Math.max(1, Math.floor(imageWidthCells));
+		if (this.imageWidthCells === nextWidth) return;
+		this.imageWidthCells = nextWidth;
+		this.imageComponents.clear();
+		this.rebuild();
+	}
+
 	override invalidate(): void {
 		super.invalidate();
+		for (const image of this.imageComponents.values()) image.component.invalidate();
 		this.rebuild();
 	}
 
 	private rebuild(): void {
 		this.clear();
+		const turn = {
+			messages: this.messages,
+			customEntries: this.customEntries,
+			toolExecutions: this.toolExecutions,
+			isStreaming: this.isStreaming,
+		};
+		const options = { expanded: this.expanded, outputPad: this.outputPad, showImages: this.showImages };
 		let component: Component | undefined;
 		try {
-			component = this.renderer(
-				{ messages: this.messages, toolExecutions: this.toolExecutions, isStreaming: this.isStreaming },
-				{ expanded: this.expanded, outputPad: this.outputPad, showImages: this.showImages },
-				theme,
-			);
+			component = this.renderer(turn, options, theme);
 		} catch {
-			// A renderer failure must not corrupt the transcript. The regular
-			// renderer will resume on reload or when the extension is removed.
-			return;
+			const fallback = new Container();
+			fallback.addChild(
+				new Text(theme.fg("error", "Transcript turn renderer failed; using Pi's default turn rendering."), 0, 0),
+			);
+			try {
+				const stockComponent = this.fallbackRenderer?.(turn, options, theme);
+				if (stockComponent) fallback.addChild(stockComponent);
+			} catch {
+				fallback.addChild(new Text(theme.fg("error", "Pi could not render this turn."), 0, 0));
+			}
+			component = fallback;
 		}
 		if (component) this.addChild(component);
+		this.rebuildImages();
+	}
 
-		if (!this.showImages || !getCapabilities().images) return;
+	private rebuildImages(): void {
+		const activeKeys = new Set<string>();
+		for (const execution of this.toolExecutions) {
+			for (const [index, content] of (execution.result?.content ?? []).entries()) {
+				if (content.type === "image" && content.data && content.mimeType) {
+					activeKeys.add(`${execution.toolCallId}:${index}`);
+				}
+			}
+		}
+		for (const key of this.convertedImages.keys()) {
+			if (!activeKeys.has(key)) this.convertedImages.delete(key);
+		}
+		for (const key of this.imageConversions.keys()) {
+			if (!activeKeys.has(key)) this.imageConversions.delete(key);
+		}
+		for (const key of this.imageComponents.keys()) {
+			if (!activeKeys.has(key)) this.imageComponents.delete(key);
+		}
+
+		const capabilities = getCapabilities();
+		if (!this.showImages || !capabilities.images) return;
+
 		for (const execution of this.toolExecutions) {
 			for (const [index, content] of (execution.result?.content ?? []).entries()) {
 				if (content.type !== "image" || !content.data || !content.mimeType) continue;
 				const key = `${execution.toolCallId}:${index}`;
-				let image = this.convertedImages.get(key) ?? content;
-				if (getCapabilities().images === "kitty" && image.mimeType !== "image/png") {
-					convertToPng(content.data, content.mimeType).then((converted) => {
-						if (!converted) return;
-						this.convertedImages.set(key, converted);
-						this.rebuild();
-						this.ui.requestRender();
-					});
+				const converted = this.convertedImages.get(key);
+				const matchesSource =
+					converted?.sourceData === content.data && converted.sourceMimeType === content.mimeType;
+				const image = matchesSource ? converted : content;
+				if (capabilities.images === "kitty" && image.mimeType !== "image/png") {
+					this.convertImageForKitty(key, content.data, content.mimeType);
 					continue;
 				}
+
+				let cached = this.imageComponents.get(key);
+				if (
+					!cached ||
+					cached.data !== image.data ||
+					cached.mimeType !== image.mimeType ||
+					cached.maxWidthCells !== this.imageWidthCells
+				) {
+					cached = {
+						data: image.data,
+						mimeType: image.mimeType,
+						maxWidthCells: this.imageWidthCells,
+						component: new Image(
+							image.data,
+							image.mimeType,
+							{ fallbackColor: (text) => theme.fg("muted", text) },
+							{ maxWidthCells: this.imageWidthCells },
+						),
+					};
+					this.imageComponents.set(key, cached);
+				}
 				this.addChild(new Spacer(1));
-				this.addChild(
-					new Image(
-						image.data,
-						image.mimeType,
-						{ fallbackColor: (text: string) => theme.fg("toolOutput", text) },
-						{ maxWidthCells: this.imageWidthCells },
-					),
-				);
+				this.addChild(cached.component);
 			}
 		}
+	}
+
+	private convertImageForKitty(key: string, data: string, mimeType: string): void {
+		const current = this.imageConversions.get(key);
+		if (current?.sourceData === data && current.sourceMimeType === mimeType) return;
+		this.imageConversions.set(key, { sourceData: data, sourceMimeType: mimeType, status: "pending" });
+		void convertToPng(data, mimeType).then(
+			(converted) => {
+				const latest = this.imageConversions.get(key);
+				if (latest?.sourceData !== data || latest.sourceMimeType !== mimeType) return;
+				if (converted) {
+					this.convertedImages.set(key, {
+						sourceData: data,
+						sourceMimeType: mimeType,
+						data: converted.data,
+						mimeType: converted.mimeType,
+					});
+					this.imageConversions.delete(key);
+					this.imageComponents.delete(key);
+					this.rebuild();
+					this.ui.requestRender();
+				} else {
+					latest.status = "failed";
+				}
+			},
+			() => {
+				const latest = this.imageConversions.get(key);
+				if (latest?.sourceData === data && latest.sourceMimeType === mimeType) latest.status = "failed";
+			},
+		);
 	}
 }

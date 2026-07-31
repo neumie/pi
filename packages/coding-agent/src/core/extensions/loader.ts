@@ -40,9 +40,9 @@ import type {
 	LoadExtensionsResult,
 	MessageRenderer,
 	ProviderConfig,
-	TranscriptTurnRenderer,
 	RegisteredCommand,
 	ToolDefinition,
+	TranscriptTurnRenderer,
 } from "./types.ts";
 
 /** Modules available to extensions via virtualModules (for compiled Bun binary) */

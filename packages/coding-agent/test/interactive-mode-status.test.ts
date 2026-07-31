@@ -141,6 +141,26 @@ describe("InteractiveMode.setToolsExpanded", () => {
 		expect(chatChild.setExpanded).toHaveBeenCalledWith(true);
 		expect(fakeThis.showStatus).toHaveBeenCalledWith("Tool output: expanded");
 	});
+
+	test("does not append a second status row when a transcript turn owns expansion", () => {
+		const transcriptTurnComponent = { setExpanded: vi.fn() };
+		const fakeThis: any = {
+			toolOutputExpanded: false,
+			customHeader: undefined,
+			builtInHeader: undefined,
+			loadedResourcesContainer: { children: [] },
+			chatContainer: { children: [transcriptTurnComponent] },
+			transcriptTurnComponent,
+			ui: { requestRender: vi.fn() },
+			showStatus: vi.fn(),
+		};
+
+		(InteractiveMode as any).prototype.setToolsExpanded.call(fakeThis, true);
+
+		expect(transcriptTurnComponent.setExpanded).toHaveBeenCalledWith(true);
+		expect(fakeThis.showStatus).not.toHaveBeenCalled();
+		expect(fakeThis.ui.requestRender).toHaveBeenCalled();
+	});
 });
 
 describe("InteractiveMode.createExtensionUIContext setTheme", () => {

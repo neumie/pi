@@ -1568,9 +1568,11 @@ Register a custom TUI renderer for custom entries with your `customType`. Custom
 
 ### pi.registerTranscriptTurnRenderer(renderer)
 
-Opt in to replacing the ordinary assistant and tool rows between user messages with one extension-owned component. The renderer receives the complete, mutable turn snapshot while streaming and again when it settles. It is TUI-only: it does not change session entries, model context, or non-TUI output. Pi keeps image content blocks outside the extension component and renders them through its native image component, preserving terminal image protocol ownership.
+Opt in to replacing visible non-user output between user messages with one extension-owned component. The current snapshot includes assistant/tool messages, displayed custom messages, and custom entries that have registered entry renderers. Hidden custom messages (`display: false`) and state-only entries without renderers are never supplied. While this seam is active, the turn renderer owns the summarized representation of those visible custom surfaces instead of their per-message or per-entry renderers.
 
-Only the first registered turn renderer is used, in extension load order. On stock Pi versions that do not expose this API, extensions should feature-detect it and retain normal transcript rendering.
+The renderer receives updates while the turn is streaming and again when it settles. While it owns a turn, Pi suppresses the separate working indicator. The seam is TUI-only: it does not change session entries, model context, or non-TUI output. Pi keeps image content blocks outside the extension component and renders them through its native image component, preserving terminal image protocol ownership. If the renderer throws, Pi reports the failure, falls back to its default assistant/tool rendering, and still preserves native images.
+
+Only the first registered turn renderer is used, in extension load order. New and rebuilt components inherit the current global expansion state. On stock Pi versions that do not expose this API, extensions should feature-detect it and retain normal transcript rendering.
 
 ```typescript
 import { Text } from "@earendil-works/pi-tui";

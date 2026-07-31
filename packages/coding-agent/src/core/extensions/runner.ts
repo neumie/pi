@@ -43,7 +43,6 @@ import type {
 	MessageEndEventResult,
 	MessageRenderer,
 	ProjectTrustContext,
-	TranscriptTurnRenderer,
 	ProjectTrustEvent,
 	ProjectTrustEventResult,
 	ProviderConfig,
@@ -62,6 +61,7 @@ import type {
 	ToolCallEventResult,
 	ToolResultEvent,
 	ToolResultEventResult,
+	TranscriptTurnRenderer,
 	UserBashEvent,
 	UserBashEventResult,
 } from "./types.ts";
