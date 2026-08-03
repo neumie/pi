@@ -1,12 +1,29 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai/compat";
-import { Container, Text } from "@earendil-works/pi-tui";
-import { beforeAll, describe, expect, test, vi } from "vitest";
+import { Container, resetCapabilitiesCache, setCapabilities, Text } from "@earendil-works/pi-tui";
+import { afterEach, beforeAll, describe, expect, expectTypeOf, test, vi } from "vitest";
 import type { TranscriptTurn, TranscriptTurnRenderOptions } from "../src/core/extensions/types.ts";
+import type { TranscriptTurnMessage } from "../src/index.ts";
+import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
+import {
+	type TranscriptToolExecutionSource,
+	TranscriptTurnComponent,
+} from "../src/modes/interactive/components/transcript-turn.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
+import { stripAnsi } from "../src/utils/ansi.ts";
+
+const imageConversion = vi.hoisted(() => ({
+	convertToPng: vi.fn<(data: string, mimeType: string) => Promise<{ data: string; mimeType: string } | undefined>>(),
+}));
+
+vi.mock("../src/utils/image-convert.ts", () => ({ convertToPng: imageConversion.convertToPng }));
 
 describe("InteractiveMode transcript turns", () => {
 	beforeAll(() => initTheme("dark"));
+	afterEach(() => {
+		resetCapabilitiesCache();
+		imageConversion.convertToPng.mockReset();
+	});
 
 	test("replays visible related output into one expanded surface per user turn", () => {
 		const snapshots: Array<{
@@ -106,6 +123,7 @@ describe("InteractiveMode transcript turns", () => {
 		];
 
 		prototype.renderTranscriptTurnItems.call(fakeThis, items, {});
+		chatContainer.render(100);
 
 		expect(chatContainer.children).toHaveLength(4);
 		const firstCompleted = snapshots
@@ -114,7 +132,11 @@ describe("InteractiveMode transcript turns", () => {
 			.find((snapshot) => snapshot.customEntries.length === 1);
 		expect(firstCompleted?.messages.map((message) => message.role)).toEqual(["custom", "assistant"]);
 		expect(firstCompleted?.toolExecutions).toMatchObject([
-			{ toolCallId: "call-1", result: { content: [{ type: "text", text: "done" }], isError: false } },
+			{
+				toolCallId: "call-1",
+				result: { content: [{ type: "text", text: "done" }], isError: false },
+				isPartial: false,
+			},
 		]);
 		expect(firstCompleted?.customEntries.map((entry) => entry.customType)).toEqual(["progress-card"]);
 		expect(snapshots.every((snapshot) => snapshot.options.expanded)).toBe(true);
@@ -174,7 +196,7 @@ describe("InteractiveMode transcript turns", () => {
 		expect(displayed.errorMessage).toBe("Aborted after 2 retry attempts");
 	});
 
-	test("reconciles aborted assistant tool calls before tool execution starts", () => {
+	test.each(["aborted", "error"] as const)("reconciles omitted %s assistant tool calls", (stopReason) => {
 		const prototype = InteractiveMode.prototype as any;
 		const toolExecutions = new Map();
 		const updateTranscriptTurn = vi.fn(() => true);
@@ -198,17 +220,231 @@ describe("InteractiveMode transcript turns", () => {
 			stopReason: "pending",
 			timestamp: 0,
 		} as unknown as AssistantMessage;
-		const abortedMessage = { ...pendingMessage, stopReason: "aborted" } as AssistantMessage;
+		const terminalMessage = { ...pendingMessage, content: [], stopReason } as AssistantMessage;
 
 		expect(prototype.startTranscriptAssistant.call(fakeThis, pendingMessage)).toBe(true);
-		expect(toolExecutions.get("never-started")?.isPartial).toBe(true);
-		expect(prototype.updateTranscriptAssistant.call(fakeThis, abortedMessage)).toBe(true);
-		expect(toolExecutions.get("never-started")).toMatchObject({
-			toolName: "bash",
-			args: { command: "pwd" },
-			isPartial: false,
+		toolExecutions.set("retained", {
+			toolCallId: "retained",
+			toolName: "read",
+			args: { path: "README.md" },
+			result: { content: [{ type: "text", text: "retained result" }], isError: false },
+			isPartial: true,
 		});
+		expect(prototype.updateTranscriptAssistant.call(fakeThis, terminalMessage)).toBe(true);
+		expect([...toolExecutions.values()]).toMatchObject([
+			{
+				toolCallId: "never-started",
+				toolName: "bash",
+				args: { command: "pwd" },
+				isPartial: false,
+			},
+			{
+				toolCallId: "retained",
+				toolName: "read",
+				args: { path: "README.md" },
+				result: { content: [{ type: "text", text: "retained result" }], isError: false },
+				isPartial: false,
+			},
+		]);
 		expect(updateTranscriptTurn).toHaveBeenCalledTimes(2);
+	});
+
+	test.each([
+		["aborted", "Aborted fallback"],
+		["error", "Error fallback"],
+	] as const)(
+		"stock fallback renders retained omitted executions after %s terminal content",
+		(stopReason, errorMessage) => {
+			const prototype = InteractiveMode.prototype as any;
+			const updateResult = vi.spyOn(ToolExecutionComponent.prototype, "updateResult");
+			try {
+				const fallbackContext: any = {
+					hideThinkingBlock: false,
+					hiddenThinkingLabel: "Thinking...",
+					getMarkdownThemeWithSettings: () => ({}),
+					settingsManager: { getImageWidthCells: () => 80 },
+					getRegisteredToolDefinition: () => undefined,
+					ui: { requestRender() {} },
+					sessionManager: { getCwd: () => process.cwd() },
+					session: { extensionRunner: { getEntryRenderer: () => undefined } },
+				};
+				const executions = new Map<string, TranscriptToolExecutionSource>([
+					["pending", { toolCallId: "pending", toolName: "bash", args: { command: "pwd" }, isPartial: false }],
+					[
+						"result",
+						{
+							toolCallId: "result",
+							toolName: "edit",
+							args: { path: "README.md" },
+							result: {
+								content: [{ type: "text" as const, text: "retained output" }],
+								details: { diff: "retained details" },
+								isError: false,
+							},
+							isPartial: false,
+						},
+					],
+				]);
+				const component = new TranscriptTurnComponent(
+					() => {
+						throw new Error("renderer failure");
+					},
+					1,
+					false,
+					80,
+					{ requestRender() {} } as never,
+					false,
+					prototype.renderDefaultTranscriptTurn.bind(fallbackContext),
+				);
+				component.update({
+					messages: [
+						{
+							role: "assistant",
+							content: [],
+							api: "test",
+							provider: "test",
+							model: "test",
+							usage: {},
+							stopReason,
+							errorMessage,
+							timestamp: 0,
+						},
+					] as never,
+					customEntries: [],
+					toolExecutions: executions,
+					isStreaming: false,
+				});
+				const rendered = stripAnsi(component.render(100).join("\n"));
+				expect(rendered).toContain(errorMessage);
+				expect(rendered).toContain("retained details");
+				expect(updateResult).toHaveBeenCalledWith(
+					expect.objectContaining({
+						details: { diff: "retained details" },
+						content: [{ type: "text", text: "retained output" }],
+					}),
+					false,
+				);
+			} finally {
+				updateResult.mockRestore();
+			}
+		},
+	);
+
+	test("exports transcript messages without user or tool-result variants", () => {
+		expectTypeOf<Extract<TranscriptTurnMessage, { role: "user" | "toolResult" }>>().toEqualTypeOf<never>();
+	});
+
+	test("reset detaches every direct transcript surface while retaining other chat children", () => {
+		const prototype = InteractiveMode.prototype as any;
+		const chatContainer = new Container();
+		const turnOne = new TranscriptTurnComponent(() => new Text("one", 0, 0), 1, false, 80, {
+			requestRender() {},
+		} as never);
+		const turnTwo = new TranscriptTurnComponent(() => new Text("two", 0, 0), 1, false, 80, {
+			requestRender() {},
+		} as never);
+		const nonTurn = new Text("keep", 0, 0);
+		chatContainer.addChild(turnOne);
+		chatContainer.addChild(nonTurn);
+		chatContainer.addChild(turnTwo);
+		const fakeThis: any = {
+			chatContainer,
+			transcriptTurnComponent: turnTwo,
+			transcriptTurnMessages: [{}],
+			transcriptCustomEntries: [{}],
+			transcriptToolExecutions: new Map([["tool", {}]]),
+			transcriptAssistantIndex: 0,
+			transcriptTurnStreaming: false,
+			clearTranscriptTurn: prototype.clearTranscriptTurn,
+		};
+		prototype.detachTranscriptTurns.call(fakeThis);
+		expect(chatContainer.children).toEqual([nonTurn]);
+		expect(fakeThis.transcriptTurnComponent).toBeUndefined();
+		expect(turnOne.render(80)).toEqual([]);
+		expect(turnTwo.render(80)).toEqual([]);
+	});
+
+	test("normal chat clears deactivate pending image conversions", async () => {
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		let resolveConversion: (value: { data: string; mimeType: string } | undefined) => void = () => {};
+		imageConversion.convertToPng.mockReturnValue(
+			new Promise((resolve) => {
+				resolveConversion = resolve;
+			}),
+		);
+		const renderer = vi.fn(() => new Text("turn", 0, 0));
+		const requestRender = vi.fn();
+		const transcript = new TranscriptTurnComponent(renderer, 1, true, 80, { requestRender } as never);
+		transcript.update({
+			messages: [],
+			customEntries: [],
+			toolExecutions: [
+				{
+					toolCallId: "image",
+					toolName: "read",
+					args: {},
+					result: { content: [{ type: "image", data: "jpeg", mimeType: "image/jpeg" }], isError: false },
+					isPartial: false,
+				},
+			],
+			isStreaming: false,
+		});
+		transcript.render(80);
+		const chatContainer = new Container();
+		chatContainer.addChild(transcript);
+		const prototype = InteractiveMode.prototype as any;
+		const fakeThis: any = {
+			chatContainer,
+			transcriptTurnComponent: transcript,
+			transcriptTurnMessages: [],
+			transcriptCustomEntries: [],
+			transcriptToolExecutions: new Map(),
+			transcriptAssistantIndex: undefined,
+			transcriptTurnStreaming: false,
+			clearTranscriptTurn: prototype.clearTranscriptTurn,
+		};
+		prototype.clearChatContainer.call(fakeThis);
+		resolveConversion({ data: "png", mimeType: "image/png" });
+		await Promise.resolve();
+		expect(chatContainer.children).toEqual([]);
+		expect(renderer).toHaveBeenCalledOnce();
+		expect(requestRender).toHaveBeenCalledOnce();
+	});
+
+	test("rotates tool execution maps while completed turns retain their ordered source", () => {
+		const prototype = InteractiveMode.prototype as any;
+		const executions = new Map([
+			["first", { toolCallId: "first", toolName: "bash", args: { command: "pwd" }, isPartial: false }],
+			[
+				"second",
+				{
+					toolCallId: "second",
+					toolName: "read",
+					args: { path: "README.md" },
+					result: { content: [{ type: "text", text: "done" }], isError: false },
+					isPartial: false,
+				},
+			],
+		]);
+		const updates: Array<{ toolExecutions: unknown }> = [];
+		const fakeThis: any = {
+			transcriptTurnComponent: { update: (turn: { toolExecutions: unknown }) => updates.push(turn) },
+			transcriptTurnMessages: [],
+			transcriptCustomEntries: [],
+			transcriptToolExecutions: executions,
+			transcriptAssistantIndex: undefined,
+			transcriptTurnStreaming: false,
+			clearTranscriptTurn: prototype.clearTranscriptTurn,
+		};
+		expect(prototype.updateTranscriptTurn.call(fakeThis)).toBe(true);
+		expect(updates[0]?.toolExecutions).toBe(executions);
+		prototype.clearTranscriptTurn.call(fakeThis);
+		expect(fakeThis.transcriptToolExecutions).not.toBe(executions);
+		expect([...executions.values()]).toMatchObject([
+			{ toolCallId: "first", args: { command: "pwd" } },
+			{ toolCallId: "second", result: { content: [{ type: "text", text: "done" }], isError: false } },
+		]);
+		expect(fakeThis.transcriptToolExecutions.size).toBe(0);
 	});
 
 	test("settles before clearing a user boundary but clear itself never updates stale components", () => {

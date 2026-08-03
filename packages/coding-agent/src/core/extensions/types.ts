@@ -1152,10 +1152,13 @@ export interface TranscriptToolExecution {
 	isPartial: boolean;
 }
 
+/** Visible transcript message roles: assistant, bash execution, displayed custom, and summaries. */
+export type TranscriptTurnMessage = Exclude<AgentMessage, { role: "user" | "toolResult" }>;
+
 /** The non-user output produced after one user message and before the next. */
 export interface TranscriptTurn {
 	/** Visible agent messages, excluding user and tool-result messages. Hidden custom messages are never included. */
-	messages: readonly AgentMessage[];
+	messages: readonly TranscriptTurnMessage[];
 	/** Visible custom session entries whose registered entry renderers produce content. */
 	customEntries: readonly CustomEntry[];
 	toolExecutions: readonly TranscriptToolExecution[];
@@ -1174,9 +1177,11 @@ export interface TranscriptTurnRenderOptions {
 /**
  * Renders all visible non-user output in a transcript turn as one component.
  * This includes displayed custom messages and custom entries whose registered
- * renderers produce content; hidden and state-only custom data is never supplied. Pi supplies a deeply detached snapshot:
- * mutations cannot affect agent/session state, stock fallback, or native images. Values that cannot be
- * cloned cause Pi to use stock rendering rather than exposing host-owned references.
+ * renderers produce content; hidden and state-only custom data is never supplied. Pi supplies a deeply detached,
+ * latest frame-coalesced snapshot while streaming and a final snapshot after settlement: mutations cannot affect
+ * agent/session state, stock fallback, or native images. Unsupported, uncloneable, or best-effort estimated
+ * safety-budget-exceeding values use stock rendering rather than exposing host-owned references. This estimate is
+ * not a hard CPU, memory, or resource-isolation boundary and cannot undo source allocation or engine key enumeration.
  *
  * Register at most one renderer across loaded extensions; Pi uses the first in
  * extension load order. Pi preserves image content blocks as native image rows

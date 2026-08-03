@@ -160,6 +160,7 @@ export type {
 	ToolResultEventResult,
 	TranscriptToolExecution,
 	TranscriptTurn,
+	TranscriptTurnMessage,
 	TranscriptTurnRenderer,
 	TranscriptTurnRenderOptions,
 	TreePreparation,

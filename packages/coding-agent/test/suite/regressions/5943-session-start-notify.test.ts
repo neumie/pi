@@ -472,6 +472,26 @@ describe("regression #5943: session_start transient UI", () => {
 		expect(events).toEqual(["reload", "rebuild:true", "start:true"]);
 	});
 
+	it("restores chat when reload fails before its session-start hook", async () => {
+		initTheme("dark", false);
+		const rebuildChatFromMessages = vi.fn();
+		const showError = vi.fn();
+		const context = createReloadCommandContext({
+			session: {
+				reload: async () => {
+					throw new Error("early reload failure");
+				},
+			},
+			rebuildChatFromMessages,
+			showError,
+		});
+
+		await interactiveModePrototype.handleReloadCommand.call(context);
+
+		expect(rebuildChatFromMessages).toHaveBeenCalledOnce();
+		expect(showError).toHaveBeenCalledWith("Reload failed: early reload failure");
+	});
+
 	it("keeps the reload blocker focused until async reload completes", async () => {
 		initTheme("dark", false);
 		const editor = {};

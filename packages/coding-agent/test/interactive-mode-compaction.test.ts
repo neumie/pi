@@ -10,7 +10,6 @@ describe("InteractiveMode compaction events", () => {
 			autoCompactionLoader: undefined,
 			defaultEditor: {},
 			statusContainer: { clear: vi.fn() },
-			chatContainer: { clear: vi.fn() },
 			rebuildChatFromMessages: vi.fn(),
 			addMessageToChat: vi.fn(),
 			showError: vi.fn(),
@@ -44,7 +43,6 @@ describe("InteractiveMode compaction events", () => {
 			willRetry: false,
 		});
 
-		expect(fakeThis.chatContainer.clear).toHaveBeenCalledTimes(1);
 		expect(fakeThis.rebuildChatFromMessages).toHaveBeenCalledTimes(1);
 		expect(fakeThis.addMessageToChat).toHaveBeenCalledTimes(1);
 		expect(fakeThis.addMessageToChat).toHaveBeenCalledWith(

@@ -74,6 +74,7 @@ import type {
 	ExtensionUIDialogOptions,
 	ExtensionWidgetOptions,
 	ProjectTrustContext,
+	TranscriptTurnMessage,
 	TranscriptTurnRenderer,
 	TranscriptTurnRenderOptions,
 	WorkingIndicatorOptions,
@@ -146,9 +147,12 @@ import {
 } from "./components/status-indicator.ts";
 import { ToolExecutionComponent } from "./components/tool-execution.ts";
 import {
+	getTranscriptToolExecution,
+	getTranscriptToolResultTextContent,
 	type TranscriptToolExecutionSource,
 	TranscriptTurnComponent,
 	type TranscriptTurnSource,
+	transcriptToolExecutionValues,
 } from "./components/transcript-turn.ts";
 import { TreeSelectorComponent } from "./components/tree-selector.ts";
 import { TrustSelectorComponent } from "./components/trust-selector.ts";
@@ -514,7 +518,7 @@ export class InteractiveMode {
 
 	// Opt-in extension-owned transcript turn tracking.
 	private transcriptTurnComponent: TranscriptTurnComponent | undefined = undefined;
-	private transcriptTurnMessages: AgentMessage[] = [];
+	private transcriptTurnMessages: TranscriptTurnMessage[] = [];
 	private transcriptCustomEntries: Array<Extract<SessionEntry, { type: "custom" }>> = [];
 	private transcriptToolExecutions = new Map<string, TranscriptToolExecutionSource>();
 	private transcriptAssistantIndex: number | undefined = undefined;
@@ -1834,7 +1838,7 @@ export class InteractiveMode {
 						return { cancelled: true };
 					}
 
-					this.chatContainer.clear();
+					this.clearChatContainer();
 					this.renderInitialMessages();
 					if (result.editorText && !this.editor.getText().trim()) {
 						this.editor.setText(result.editorText);
@@ -1930,7 +1934,7 @@ export class InteractiveMode {
 
 	private renderCurrentSessionState(): void {
 		this.loadedResourcesContainer.clear();
-		this.chatContainer.clear();
+		this.clearChatContainer();
 		this.pendingMessagesContainer.clear();
 		this.compactionQueuedMessages = [];
 		this.streamingComponent = undefined;
@@ -2131,6 +2135,7 @@ export class InteractiveMode {
 	}
 
 	private resetExtensionUI(): void {
+		this.detachTranscriptTurns();
 		if (this.extensionSelector) {
 			this.hideExtensionSelector();
 		}
@@ -2161,6 +2166,23 @@ export class InteractiveMode {
 			);
 		}
 		this.setHiddenThinkingLabel();
+	}
+
+	private detachTranscriptTurns(): void {
+		for (const child of [...this.chatContainer.children]) {
+			if (child instanceof TranscriptTurnComponent) {
+				child.deactivate();
+				this.chatContainer.removeChild(child);
+			}
+		}
+		this.clearTranscriptTurn();
+	}
+
+	private clearChatContainer(): void {
+		for (const child of this.chatContainer.children) {
+			if (child instanceof TranscriptTurnComponent) child.deactivate();
+		}
+		this.chatContainer.clear();
 		this.clearTranscriptTurn();
 	}
 
@@ -3315,7 +3337,6 @@ export class InteractiveMode {
 						this.showStatus("Auto-compaction cancelled");
 					}
 				} else if (event.result) {
-					this.chatContainer.clear();
 					this.rebuildChatFromMessages();
 					this.addMessageToChat(
 						createCompactionSummaryMessage(
@@ -3436,6 +3457,46 @@ export class InteractiveMode {
 
 	private renderDefaultTranscriptTurn(turn: TranscriptTurnSource, options: TranscriptTurnRenderOptions): Component {
 		const container = new Container();
+		const renderedToolCallIds = new Set<string>();
+		let terminalAssistant: AssistantMessage | undefined;
+		const addToolExecution = (
+			toolCallId: string,
+			toolName: string,
+			args: unknown,
+			execution: TranscriptToolExecutionSource | undefined,
+			assistant: AssistantMessage | undefined,
+		) => {
+			const toolComponent = new ToolExecutionComponent(
+				toolName,
+				toolCallId,
+				args,
+				{ showImages: false, imageWidthCells: this.settingsManager.getImageWidthCells() },
+				this.getRegisteredToolDefinition(toolName),
+				this.ui,
+				this.sessionManager.getCwd(),
+			);
+			toolComponent.setExpanded(options.expanded);
+			container.addChild(toolComponent);
+			if (execution?.result) {
+				toolComponent.updateResult(
+					{ ...execution.result, content: getTranscriptToolResultTextContent(execution.result) },
+					execution.isPartial,
+				);
+				return;
+			}
+			const terminal = assistant ?? terminalAssistant;
+			if (turn.isStreaming && terminal?.stopReason !== "aborted" && terminal?.stopReason !== "error") {
+				toolComponent.markExecutionStarted();
+				return;
+			}
+			const errorMessage =
+				terminal?.stopReason === "aborted"
+					? terminal.errorMessage || "Operation aborted"
+					: terminal?.stopReason === "error"
+						? terminal.errorMessage || "Error"
+						: "Tool did not complete";
+			toolComponent.updateResult({ content: [{ type: "text", text: errorMessage }], isError: true });
+		};
 		for (const message of turn.messages) {
 			switch (message.role) {
 				case "assistant": {
@@ -3448,42 +3509,19 @@ export class InteractiveMode {
 							options.outputPad,
 						),
 					);
+					if (message.stopReason === "aborted" || message.stopReason === "error") {
+						terminalAssistant = message;
+					}
 					for (const content of message.content) {
 						if (content.type !== "toolCall") continue;
-						const execution = turn.toolExecutions.find((tool) => tool.toolCallId === content.id);
-						const toolComponent = new ToolExecutionComponent(
-							content.name,
+						renderedToolCallIds.add(content.id);
+						addToolExecution(
 							content.id,
+							content.name,
 							content.arguments,
-							{ showImages: false, imageWidthCells: this.settingsManager.getImageWidthCells() },
-							this.getRegisteredToolDefinition(content.name),
-							this.ui,
-							this.sessionManager.getCwd(),
+							getTranscriptToolExecution(turn.toolExecutions, content.id),
+							message,
 						);
-						toolComponent.setExpanded(options.expanded);
-						container.addChild(toolComponent);
-						if (execution?.result) {
-							toolComponent.updateResult(
-								{
-									...execution.result,
-									content: execution.result.content.filter((item) => item.type !== "image"),
-								},
-								execution.isPartial,
-							);
-						} else if (turn.isStreaming && message.stopReason !== "aborted" && message.stopReason !== "error") {
-							toolComponent.markExecutionStarted();
-						} else {
-							const errorMessage =
-								message.stopReason === "aborted"
-									? message.errorMessage || "Operation aborted"
-									: message.stopReason === "error"
-										? message.errorMessage || "Error"
-										: "Tool did not complete";
-							toolComponent.updateResult({
-								content: [{ type: "text", text: errorMessage }],
-								isError: true,
-							});
-						}
 					}
 					break;
 				}
@@ -3526,10 +3564,11 @@ export class InteractiveMode {
 					container.addChild(component);
 					break;
 				}
-				case "toolResult":
-				case "user":
-					break;
 			}
+		}
+		for (const execution of transcriptToolExecutionValues(turn.toolExecutions)) {
+			if (renderedToolCallIds.has(execution.toolCallId)) continue;
+			addToolExecution(execution.toolCallId, execution.toolName, execution.args, execution, terminalAssistant);
 		}
 		for (const entry of turn.customEntries) {
 			const renderer = this.session.extensionRunner.getEntryRenderer(entry.customType);
@@ -3567,7 +3606,7 @@ export class InteractiveMode {
 		this.transcriptTurnComponent = undefined;
 		this.transcriptTurnMessages = [];
 		this.transcriptCustomEntries = [];
-		this.transcriptToolExecutions.clear();
+		this.transcriptToolExecutions = new Map();
 		this.transcriptAssistantIndex = undefined;
 		this.transcriptTurnStreaming = true;
 	}
@@ -3577,13 +3616,13 @@ export class InteractiveMode {
 		this.transcriptTurnComponent.update({
 			messages: this.transcriptTurnMessages,
 			customEntries: this.transcriptCustomEntries,
-			toolExecutions: [...this.transcriptToolExecutions.values()],
+			toolExecutions: this.transcriptToolExecutions,
 			isStreaming: this.transcriptTurnStreaming,
 		});
 		return true;
 	}
 
-	private appendTranscriptMessage(message: AgentMessage): boolean {
+	private appendTranscriptMessage(message: TranscriptTurnMessage): boolean {
 		if (!this.ensureTranscriptTurnComponent()) return false;
 		this.transcriptTurnMessages.push(message);
 		return this.updateTranscriptTurn();
@@ -3618,6 +3657,11 @@ export class InteractiveMode {
 
 	private reconcileTranscriptToolCalls(message: AssistantMessage, isPartial = true): void {
 		const isTerminalFailure = message.stopReason === "aborted" || message.stopReason === "error";
+		if (isTerminalFailure) {
+			for (const [toolCallId, execution] of this.transcriptToolExecutions) {
+				this.transcriptToolExecutions.set(toolCallId, { ...execution, isPartial: false });
+			}
+		}
 		for (const content of message.content) {
 			if (content.type !== "toolCall") continue;
 			const previous = this.transcriptToolExecutions.get(content.id);
@@ -3856,7 +3900,7 @@ export class InteractiveMode {
 		this.transcriptTurnComponent = undefined;
 		this.transcriptTurnMessages = [];
 		this.transcriptCustomEntries = [];
-		this.transcriptToolExecutions?.clear();
+		this.transcriptToolExecutions = new Map();
 		this.transcriptAssistantIndex = undefined;
 		this.transcriptTurnStreaming = true;
 		if (this.getTranscriptTurnRenderer?.()) {
@@ -4044,7 +4088,7 @@ export class InteractiveMode {
 	}
 
 	private rebuildChatFromMessages(): void {
-		this.chatContainer.clear();
+		this.clearChatContainer();
 		this.renderSessionEntries(this.sessionManager.buildContextEntries());
 	}
 
@@ -4359,7 +4403,6 @@ export class InteractiveMode {
 		this.settingsManager.setHideThinkingBlock(this.hideThinkingBlock);
 
 		// Rebuild chat from session messages
-		this.chatContainer.clear();
 		this.rebuildChatFromMessages();
 
 		// If streaming, re-add the streaming component with updated visibility and re-render
@@ -4760,7 +4803,6 @@ export class InteractiveMode {
 								child.setHideThinkingBlock(hidden);
 							}
 						}
-						this.chatContainer.clear();
 						this.rebuildChatFromMessages();
 					},
 					onShowCacheMissNoticesChange: (shown) => {
@@ -5260,7 +5302,7 @@ export class InteractiveMode {
 						}
 
 						// Update UI
-						this.chatContainer.clear();
+						this.clearChatContainer();
 						this.renderInitialMessages();
 						if (result.editorText && !this.editor.getText().trim()) {
 							this.editor.setText(result.editorText);
@@ -5972,6 +6014,7 @@ export class InteractiveMode {
 			dismissReloadBox(this.editor as Component);
 			reloadBoxDismissed = true;
 		} catch (error) {
+			restoreChatBeforeSessionStart();
 			if (!reloadBoxDismissed) {
 				dismissReloadBox(previousEditor as Component);
 			}

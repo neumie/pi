@@ -141,6 +141,7 @@ export type {
 	ToolResultEvent,
 	TranscriptToolExecution,
 	TranscriptTurn,
+	TranscriptTurnMessage,
 	TranscriptTurnRenderer,
 	TranscriptTurnRenderOptions,
 	TurnEndEvent,

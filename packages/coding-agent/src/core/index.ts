@@ -75,6 +75,7 @@ export {
 	type ToolResultEvent,
 	type TranscriptToolExecution,
 	type TranscriptTurn,
+	type TranscriptTurnMessage,
 	type TranscriptTurnRenderer,
 	type TranscriptTurnRenderOptions,
 	type TurnEndEvent,
