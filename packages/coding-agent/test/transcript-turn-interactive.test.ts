@@ -1,3 +1,4 @@
+import type { AssistantMessage } from "@earendil-works/pi-ai/compat";
 import { Container, Text } from "@earendil-works/pi-tui";
 import { beforeAll, describe, expect, test, vi } from "vitest";
 import type { TranscriptTurn, TranscriptTurnRenderOptions } from "../src/core/extensions/types.ts";
@@ -11,6 +12,7 @@ describe("InteractiveMode transcript turns", () => {
 		const snapshots: Array<{
 			messages: TranscriptTurn["messages"];
 			customEntries: TranscriptTurn["customEntries"];
+			toolExecutions: TranscriptTurn["toolExecutions"];
 			options: TranscriptTurnRenderOptions;
 			isStreaming: boolean;
 		}> = [];
@@ -18,6 +20,7 @@ describe("InteractiveMode transcript turns", () => {
 			snapshots.push({
 				messages: [...turn.messages],
 				customEntries: [...turn.customEntries],
+				toolExecutions: [...turn.toolExecutions],
 				options: { ...options },
 				isStreaming: turn.isStreaming,
 			});
@@ -55,6 +58,8 @@ describe("InteractiveMode transcript turns", () => {
 			appendTranscriptCustomEntry: prototype.appendTranscriptCustomEntry,
 			updateTranscriptTool: prototype.updateTranscriptTool,
 			setTranscriptTurnStreaming: prototype.setTranscriptTurnStreaming,
+			settleAndClearTranscriptTurn: prototype.settleAndClearTranscriptTurn,
+			reconcileTranscriptToolCalls: prototype.reconcileTranscriptToolCalls,
 		};
 		const items = [
 			{ role: "user", content: "one", timestamp: 1 },
@@ -62,12 +67,21 @@ describe("InteractiveMode transcript turns", () => {
 			{ role: "custom", customType: "hidden-state", content: "PRIVATE", display: false, timestamp: 3 },
 			{
 				role: "assistant",
-				content: [],
+				content: [{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "pwd" } }],
 				api: "test",
 				provider: "test",
 				model: "test",
 				usage: {},
 				stopReason: "stop",
+				timestamp: 4,
+			},
+			{
+				role: "toolResult",
+				toolCallId: "call-1",
+				toolName: "bash",
+				content: [{ type: "text", text: "done" }],
+				details: { exitCode: 0 },
+				isError: false,
 				timestamp: 4,
 			},
 			{
@@ -99,10 +113,38 @@ describe("InteractiveMode transcript turns", () => {
 			.reverse()
 			.find((snapshot) => snapshot.customEntries.length === 1);
 		expect(firstCompleted?.messages.map((message) => message.role)).toEqual(["custom", "assistant"]);
+		expect(firstCompleted?.toolExecutions).toMatchObject([
+			{ toolCallId: "call-1", result: { content: [{ type: "text", text: "done" }], isError: false } },
+		]);
 		expect(firstCompleted?.customEntries.map((entry) => entry.customType)).toEqual(["progress-card"]);
 		expect(snapshots.every((snapshot) => snapshot.options.expanded)).toBe(true);
+		expect(snapshots.some((snapshot) => snapshot.customEntries.length === 1 && !snapshot.isStreaming)).toBe(true);
 		expect(snapshots.at(-1)?.isStreaming).toBe(false);
 		expect(fakeThis.addCustomEntryToChat).not.toHaveBeenCalled();
+	});
+
+	test("excludes custom entries whose registered renderer produces no content", () => {
+		const prototype = InteractiveMode.prototype as any;
+		const ensureTranscriptTurnComponent = vi.fn();
+		const entry = {
+			type: "custom",
+			id: "state-only",
+			parentId: null,
+			timestamp: "2026-01-01T00:00:00.000Z",
+			customType: "state-only",
+			data: { private: true },
+		};
+		const fakeThis: any = {
+			getTranscriptTurnRenderer: () => () => undefined,
+			session: { extensionRunner: { getEntryRenderer: () => () => undefined } },
+			toolOutputExpanded: false,
+			ensureTranscriptTurnComponent,
+			transcriptCustomEntries: [],
+		};
+
+		expect(prototype.appendTranscriptCustomEntry.call(fakeThis, entry)).toBe(false);
+		expect(ensureTranscriptTurnComponent).not.toHaveBeenCalled();
+		expect(fakeThis.transcriptCustomEntries).toEqual([]);
 	});
 
 	test("adds an aborted display label without mutating the persisted assistant message", () => {
@@ -130,6 +172,67 @@ describe("InteractiveMode transcript turns", () => {
 		if (!displayed) throw new Error("Expected a display-only assistant message");
 		expect(displayed).not.toBe(message);
 		expect(displayed.errorMessage).toBe("Aborted after 2 retry attempts");
+	});
+
+	test("reconciles aborted assistant tool calls before tool execution starts", () => {
+		const prototype = InteractiveMode.prototype as any;
+		const toolExecutions = new Map();
+		const updateTranscriptTurn = vi.fn(() => true);
+		const fakeThis: any = {
+			transcriptTurnComponent: {},
+			transcriptTurnMessages: [],
+			transcriptToolExecutions: toolExecutions,
+			transcriptAssistantIndex: undefined,
+			transcriptTurnStreaming: true,
+			ensureTranscriptTurnComponent: () => ({}),
+			updateTranscriptTurn,
+			reconcileTranscriptToolCalls: prototype.reconcileTranscriptToolCalls,
+		};
+		const pendingMessage = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: "never-started", name: "bash", arguments: { command: "pwd" } }],
+			api: "test",
+			provider: "test",
+			model: "test",
+			usage: {},
+			stopReason: "pending",
+			timestamp: 0,
+		} as unknown as AssistantMessage;
+		const abortedMessage = { ...pendingMessage, stopReason: "aborted" } as AssistantMessage;
+
+		expect(prototype.startTranscriptAssistant.call(fakeThis, pendingMessage)).toBe(true);
+		expect(toolExecutions.get("never-started")?.isPartial).toBe(true);
+		expect(prototype.updateTranscriptAssistant.call(fakeThis, abortedMessage)).toBe(true);
+		expect(toolExecutions.get("never-started")).toMatchObject({
+			toolName: "bash",
+			args: { command: "pwd" },
+			isPartial: false,
+		});
+		expect(updateTranscriptTurn).toHaveBeenCalledTimes(2);
+	});
+
+	test("settles before clearing a user boundary but clear itself never updates stale components", () => {
+		const prototype = InteractiveMode.prototype as any;
+		const update = vi.fn();
+		const fakeThis: any = {
+			transcriptTurnComponent: { update },
+			transcriptTurnMessages: [{}],
+			transcriptCustomEntries: [{}],
+			transcriptToolExecutions: new Map([["call", {}]]),
+			transcriptAssistantIndex: 0,
+			transcriptTurnStreaming: true,
+			setTranscriptTurnStreaming: prototype.setTranscriptTurnStreaming,
+			updateTranscriptTurn: () => {
+				update();
+				return true;
+			},
+			clearTranscriptTurn: prototype.clearTranscriptTurn,
+		};
+		prototype.settleAndClearTranscriptTurn.call(fakeThis);
+		expect(update).toHaveBeenCalledOnce();
+		expect(fakeThis.transcriptTurnComponent).toBeUndefined();
+		prototype.clearTranscriptTurn.call({ ...fakeThis, transcriptTurnComponent: { update } });
+		expect(update).toHaveBeenCalledOnce();
 	});
 
 	test("suppresses the duplicate working indicator while a turn renderer owns progress", async () => {

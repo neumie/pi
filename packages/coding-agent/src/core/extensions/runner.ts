@@ -274,6 +274,7 @@ export class ExtensionRunner {
 	private sessionManager: SessionManager;
 	private modelRegistry: ModelRegistry;
 	private errorListeners: Set<ExtensionErrorListener> = new Set();
+	private failingTranscriptTurnRenderers = new Set<Extension>();
 	private getModel: () => Model<any> | undefined = () => undefined;
 	private getScopedModels: () => readonly ScopedModel[] = () => [];
 	private isIdleFn: () => boolean = () => true;
@@ -588,7 +589,26 @@ export class ExtensionRunner {
 
 	getTranscriptTurnRenderer(): TranscriptTurnRenderer | undefined {
 		for (const ext of this.extensions) {
-			if (ext.transcriptTurnRenderer) return ext.transcriptTurnRenderer;
+			const renderer = ext.transcriptTurnRenderer;
+			if (!renderer) continue;
+			return (turn, options, rendererTheme) => {
+				try {
+					const component = renderer(turn, options, rendererTheme);
+					this.failingTranscriptTurnRenderers.delete(ext);
+					return component;
+				} catch (error) {
+					if (!this.failingTranscriptTurnRenderers.has(ext)) {
+						this.failingTranscriptTurnRenderers.add(ext);
+						this.emitError({
+							extensionPath: ext.path,
+							event: "transcript_turn_renderer",
+							error: error instanceof Error ? error.message : String(error),
+							stack: error instanceof Error ? error.stack : undefined,
+						});
+					}
+					throw error;
+				}
+			};
 		}
 		return undefined;
 	}

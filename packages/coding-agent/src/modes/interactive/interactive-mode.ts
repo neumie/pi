@@ -74,8 +74,6 @@ import type {
 	ExtensionUIDialogOptions,
 	ExtensionWidgetOptions,
 	ProjectTrustContext,
-	TranscriptToolExecution,
-	TranscriptTurn,
 	TranscriptTurnRenderer,
 	TranscriptTurnRenderOptions,
 	WorkingIndicatorOptions,
@@ -147,7 +145,11 @@ import {
 	WorkingStatusIndicator,
 } from "./components/status-indicator.ts";
 import { ToolExecutionComponent } from "./components/tool-execution.ts";
-import { TranscriptTurnComponent } from "./components/transcript-turn.ts";
+import {
+	type TranscriptToolExecutionSource,
+	TranscriptTurnComponent,
+	type TranscriptTurnSource,
+} from "./components/transcript-turn.ts";
 import { TreeSelectorComponent } from "./components/tree-selector.ts";
 import { TrustSelectorComponent } from "./components/trust-selector.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
@@ -514,7 +516,7 @@ export class InteractiveMode {
 	private transcriptTurnComponent: TranscriptTurnComponent | undefined = undefined;
 	private transcriptTurnMessages: AgentMessage[] = [];
 	private transcriptCustomEntries: Array<Extract<SessionEntry, { type: "custom" }>> = [];
-	private transcriptToolExecutions = new Map<string, TranscriptToolExecution>();
+	private transcriptToolExecutions = new Map<string, TranscriptToolExecutionSource>();
 	private transcriptAssistantIndex: number | undefined = undefined;
 	private transcriptTurnStreaming = true;
 
@@ -3085,7 +3087,7 @@ export class InteractiveMode {
 					this.addMessageToChat(event.message);
 					this.ui.requestRender();
 				} else if (event.message.role === "user") {
-					this.clearTranscriptTurn();
+					this.settleAndClearTranscriptTurn();
 					this.addMessageToChat(event.message);
 					this.updatePendingMessagesDisplay();
 					this.ui.requestRender();
@@ -3432,7 +3434,7 @@ export class InteractiveMode {
 		return this.session.extensionRunner.getTranscriptTurnRenderer();
 	}
 
-	private renderDefaultTranscriptTurn(turn: TranscriptTurn, options: TranscriptTurnRenderOptions): Component {
+	private renderDefaultTranscriptTurn(turn: TranscriptTurnSource, options: TranscriptTurnRenderOptions): Component {
 		const container = new Container();
 		for (const message of turn.messages) {
 			switch (message.role) {
@@ -3556,6 +3558,11 @@ export class InteractiveMode {
 		return this.transcriptTurnComponent;
 	}
 
+	private settleAndClearTranscriptTurn(): void {
+		this.setTranscriptTurnStreaming(false);
+		this.clearTranscriptTurn();
+	}
+
 	private clearTranscriptTurn(): void {
 		this.transcriptTurnComponent = undefined;
 		this.transcriptTurnMessages = [];
@@ -3593,18 +3600,35 @@ export class InteractiveMode {
 		return this.updateTranscriptTurn();
 	}
 
-	private startTranscriptAssistant(message: AgentMessage): boolean {
+	private startTranscriptAssistant(message: AssistantMessage): boolean {
 		if (!this.ensureTranscriptTurnComponent()) return false;
 		this.transcriptTurnStreaming = true;
 		this.transcriptAssistantIndex = this.transcriptTurnMessages.length;
 		this.transcriptTurnMessages.push(message);
+		this.reconcileTranscriptToolCalls(message);
 		return this.updateTranscriptTurn();
 	}
 
-	private updateTranscriptAssistant(message: AgentMessage): boolean {
+	private updateTranscriptAssistant(message: AssistantMessage): boolean {
 		if (!this.transcriptTurnComponent || this.transcriptAssistantIndex === undefined) return false;
 		this.transcriptTurnMessages[this.transcriptAssistantIndex] = message;
+		this.reconcileTranscriptToolCalls(message);
 		return this.updateTranscriptTurn();
+	}
+
+	private reconcileTranscriptToolCalls(message: AssistantMessage, isPartial = true): void {
+		const isTerminalFailure = message.stopReason === "aborted" || message.stopReason === "error";
+		for (const content of message.content) {
+			if (content.type !== "toolCall") continue;
+			const previous = this.transcriptToolExecutions.get(content.id);
+			this.transcriptToolExecutions.set(content.id, {
+				toolCallId: content.id,
+				toolName: content.name,
+				args: content.arguments,
+				result: previous?.result,
+				isPartial: isTerminalFailure ? false : (previous?.isPartial ?? isPartial),
+			});
+		}
 	}
 
 	private finishTranscriptAssistant(message: AssistantMessage): boolean {
@@ -3633,15 +3657,26 @@ export class InteractiveMode {
 	): boolean {
 		if (!this.transcriptTurnComponent) return false;
 		const previous = this.transcriptToolExecutions.get(toolCallId);
-		const content =
-			result && typeof result === "object" && Array.isArray((result as { content?: unknown }).content)
-				? (result as { content: Array<TextContent | ImageContent> }).content
-				: undefined;
+		const toolResult = result && typeof result === "object" ? (result as Record<string, unknown>) : undefined;
+		const content = Array.isArray(toolResult?.content)
+			? (toolResult.content as Array<TextContent | ImageContent>)
+			: undefined;
 		this.transcriptToolExecutions.set(toolCallId, {
 			toolCallId,
 			toolName,
 			args: args ?? previous?.args,
-			result: content ? { content, isError } : previous?.result,
+			result: content
+				? {
+						content,
+						details: toolResult?.details,
+						usage: toolResult?.usage,
+						addedToolNames: Array.isArray(toolResult?.addedToolNames)
+							? (toolResult.addedToolNames as string[])
+							: undefined,
+						terminate: typeof toolResult?.terminate === "boolean" ? toolResult.terminate : undefined,
+						isError,
+					}
+				: previous?.result,
 			isPartial,
 		});
 		return this.updateTranscriptTurn();
@@ -3792,26 +3827,19 @@ export class InteractiveMode {
 				continue;
 			}
 			if (item.role === "user") {
-				this.clearTranscriptTurn();
+				this.settleAndClearTranscriptTurn();
 				this.addMessageToChat(item, options);
 				continue;
 			}
 			if (item.role === "custom" && !item.display) continue;
 			if (!this.ensureTranscriptTurnComponent()) continue;
+			if (item.role === "toolResult") {
+				this.updateTranscriptTool(item.toolCallId, item.toolName, undefined, item, item.isError, false);
+				continue;
+			}
 			this.transcriptTurnMessages.push(item);
 			if (item.role === "assistant") {
-				for (const content of item.content) {
-					if (content.type === "toolCall") {
-						this.transcriptToolExecutions.set(content.id, {
-							toolCallId: content.id,
-							toolName: content.name,
-							args: content.arguments,
-							isPartial: false,
-						});
-					}
-				}
-			} else if (item.role === "toolResult") {
-				this.updateTranscriptTool(item.toolCallId, item.toolName, undefined, item, item.isError, false);
+				this.reconcileTranscriptToolCalls(item, false);
 			}
 			this.updateTranscriptTurn();
 		}

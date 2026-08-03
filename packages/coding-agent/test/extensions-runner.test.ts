@@ -612,7 +612,7 @@ describe("ExtensionRunner", () => {
 			expect(missing).toBeUndefined();
 		});
 
-		it("uses the first transcript turn renderer in extension load order", async () => {
+		it("uses the first transcript turn renderer and reports one failure episode", async () => {
 			fs.writeFileSync(
 				path.join(extensionsDir, "first-turn.ts"),
 				`export default (pi) => pi.registerTranscriptTurnRenderer(() => null);`,
@@ -624,16 +624,44 @@ describe("ExtensionRunner", () => {
 
 			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
 			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
-			const renderer = runner.getTranscriptTurnRenderer();
+			const first = result.extensions.find((extension) => extension.path.endsWith("first-turn.ts"));
+			const second = result.extensions.find((extension) => extension.path.endsWith("second-turn.ts"));
+			if (!first || !second) throw new Error("Expected transcript turn extensions");
+			let secondCalls = 0;
+			first.transcriptTurnRenderer = () => {
+				throw new Error("first renderer boom");
+			};
+			second.transcriptTurnRenderer = () => {
+				secondCalls += 1;
+				return undefined;
+			};
+			const errors: Array<{ extensionPath: string; event: string; error: string; stack?: string }> = [];
+			runner.onError((error) => errors.push(error));
+			const turn = { messages: [], customEntries: [], toolExecutions: [], isStreaming: false };
+			const options = { expanded: false, outputPad: 0, showImages: false };
 
+			const renderer = runner.getTranscriptTurnRenderer();
 			expect(renderer).toBeDefined();
-			expect(
-				renderer?.(
-					{ messages: [], customEntries: [], toolExecutions: [], isStreaming: false },
-					{ expanded: false, outputPad: 0, showImages: false },
-					{} as never,
-				),
-			).toBeNull();
+			expect(() => renderer?.(turn, options, {} as never)).toThrow("first renderer boom");
+			expect(() => renderer?.(turn, options, {} as never)).toThrow("first renderer boom");
+			expect(secondCalls).toBe(0);
+			expect(errors).toHaveLength(1);
+			expect(errors[0]).toMatchObject({
+				extensionPath: first.path,
+				event: "transcript_turn_renderer",
+				error: "first renderer boom",
+			});
+			expect(errors[0]?.stack).toContain("first renderer boom");
+
+			first.transcriptTurnRenderer = () => undefined;
+			expect(runner.getTranscriptTurnRenderer()?.(turn, options, {} as never)).toBeUndefined();
+			first.transcriptTurnRenderer = () => {
+				throw new Error("second failure episode");
+			};
+			expect(() => runner.getTranscriptTurnRenderer()?.(turn, options, {} as never)).toThrow(
+				"second failure episode",
+			);
+			expect(errors).toHaveLength(2);
 		});
 
 		it("gets entry renderer by type", async () => {

@@ -1154,9 +1154,9 @@ export interface TranscriptToolExecution {
 
 /** The non-user output produced after one user message and before the next. */
 export interface TranscriptTurn {
-	/** Visible agent messages. Hidden custom messages are never included. */
+	/** Visible agent messages, excluding user and tool-result messages. Hidden custom messages are never included. */
 	messages: readonly AgentMessage[];
-	/** Visible custom session entries with registered entry renderers. */
+	/** Visible custom session entries whose registered entry renderers produce content. */
 	customEntries: readonly CustomEntry[];
 	toolExecutions: readonly TranscriptToolExecution[];
 	/** True while Pi may append more assistant or tool output to this turn. */
@@ -1173,8 +1173,10 @@ export interface TranscriptTurnRenderOptions {
 
 /**
  * Renders all visible non-user output in a transcript turn as one component.
- * This includes displayed custom messages and custom entries that have entry
- * renderers; hidden and state-only custom data is never supplied.
+ * This includes displayed custom messages and custom entries whose registered
+ * renderers produce content; hidden and state-only custom data is never supplied. Pi supplies a deeply detached snapshot:
+ * mutations cannot affect agent/session state, stock fallback, or native images. Values that cannot be
+ * cloned cause Pi to use stock rendering rather than exposing host-owned references.
  *
  * Register at most one renderer across loaded extensions; Pi uses the first in
  * extension load order. Pi preserves image content blocks as native image rows

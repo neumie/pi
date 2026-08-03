@@ -6,7 +6,28 @@ import type {
 	TranscriptTurnRenderer,
 } from "../../../core/extensions/types.ts";
 import { convertToPng } from "../../../utils/image-convert.ts";
-import { theme } from "../theme/theme.ts";
+import { type Theme, theme } from "../theme/theme.ts";
+
+type TranscriptToolResultSource = NonNullable<TranscriptToolExecution["result"]> & {
+	details?: unknown;
+	usage?: unknown;
+	addedToolNames?: string[];
+	terminate?: boolean;
+};
+
+export type TranscriptToolExecutionSource = Omit<TranscriptToolExecution, "result"> & {
+	result?: TranscriptToolResultSource;
+};
+
+export type TranscriptTurnSource = Omit<TranscriptTurn, "toolExecutions"> & {
+	toolExecutions: readonly TranscriptToolExecutionSource[];
+};
+
+type TranscriptTurnFallbackRenderer = (
+	turn: TranscriptTurnSource,
+	options: { expanded: boolean; outputPad: number; showImages: boolean },
+	theme: Theme,
+) => Component | undefined;
 
 type ConvertedImage = {
 	sourceData: string;
@@ -34,13 +55,17 @@ type CachedImageComponent = {
  * owned by Pi's Image component.
  */
 export class TranscriptTurnComponent extends Container {
-	private messages: TranscriptTurn["messages"] = [];
-	private customEntries: TranscriptTurn["customEntries"] = [];
-	private toolExecutions: readonly TranscriptToolExecution[] = [];
-	private isStreaming = true;
+	private sourceTurn: TranscriptTurnSource = {
+		messages: [],
+		customEntries: [],
+		toolExecutions: [],
+		isStreaming: true,
+	};
+	private rendererTurn: TranscriptTurn | undefined;
+	private snapshotFailed = false;
 	private expanded = false;
 	private readonly renderer: TranscriptTurnRenderer;
-	private readonly fallbackRenderer: TranscriptTurnRenderer | undefined;
+	private readonly fallbackRenderer: TranscriptTurnFallbackRenderer | undefined;
 	private outputPad: number;
 	private showImages: boolean;
 	private imageWidthCells: number;
@@ -56,7 +81,7 @@ export class TranscriptTurnComponent extends Container {
 		imageWidthCells: number,
 		ui: TUI,
 		expanded = false,
-		fallbackRenderer?: TranscriptTurnRenderer,
+		fallbackRenderer?: TranscriptTurnFallbackRenderer,
 	) {
 		super();
 		this.renderer = renderer;
@@ -68,11 +93,28 @@ export class TranscriptTurnComponent extends Container {
 		this.expanded = expanded;
 	}
 
-	update(turn: TranscriptTurn): void {
-		this.messages = turn.messages;
-		this.customEntries = turn.customEntries;
-		this.toolExecutions = turn.toolExecutions;
-		this.isStreaming = turn.isStreaming;
+	update(turn: TranscriptTurnSource): void {
+		this.sourceTurn = turn;
+		try {
+			this.rendererTurn = structuredClone({
+				messages: turn.messages,
+				customEntries: turn.customEntries,
+				toolExecutions: turn.toolExecutions.map((execution) => ({
+					toolCallId: execution.toolCallId,
+					toolName: execution.toolName,
+					args: execution.args,
+					result: execution.result
+						? { content: execution.result.content, isError: execution.result.isError }
+						: undefined,
+					isPartial: execution.isPartial,
+				})),
+				isStreaming: turn.isStreaming,
+			} satisfies TranscriptTurn);
+			this.snapshotFailed = false;
+		} catch {
+			this.rendererTurn = undefined;
+			this.snapshotFailed = true;
+		}
 		this.rebuild();
 	}
 
@@ -110,36 +152,45 @@ export class TranscriptTurnComponent extends Container {
 
 	private rebuild(): void {
 		this.clear();
-		const turn = {
-			messages: this.messages,
-			customEntries: this.customEntries,
-			toolExecutions: this.toolExecutions,
-			isStreaming: this.isStreaming,
-		};
 		const options = { expanded: this.expanded, outputPad: this.outputPad, showImages: this.showImages };
 		let component: Component | undefined;
-		try {
-			component = this.renderer(turn, options, theme);
-		} catch {
-			const fallback = new Container();
-			fallback.addChild(
-				new Text(theme.fg("error", "Transcript turn renderer failed; using Pi's default turn rendering."), 0, 0),
+		if (this.snapshotFailed) {
+			component = this.createFallback(
+				options,
+				"Transcript turn renderer input could not be snapshotted; using Pi's default turn rendering.",
 			);
+		} else {
 			try {
-				const stockComponent = this.fallbackRenderer?.(turn, options, theme);
-				if (stockComponent) fallback.addChild(stockComponent);
+				component = this.renderer(this.rendererTurn as TranscriptTurn, options, theme);
 			} catch {
-				fallback.addChild(new Text(theme.fg("error", "Pi could not render this turn."), 0, 0));
+				component = this.createFallback(
+					options,
+					"Transcript turn renderer failed; using Pi's default turn rendering.",
+				);
 			}
-			component = fallback;
 		}
 		if (component) this.addChild(component);
 		this.rebuildImages();
 	}
 
+	private createFallback(
+		options: { expanded: boolean; outputPad: number; showImages: boolean },
+		message: string,
+	): Component {
+		const fallback = new Container();
+		fallback.addChild(new Text(theme.fg("error", message), 0, 0));
+		try {
+			const stockComponent = this.fallbackRenderer?.(this.sourceTurn, options, theme);
+			if (stockComponent) fallback.addChild(stockComponent);
+		} catch {
+			fallback.addChild(new Text(theme.fg("error", "Pi could not render this turn."), 0, 0));
+		}
+		return fallback;
+	}
+
 	private rebuildImages(): void {
 		const activeKeys = new Set<string>();
-		for (const execution of this.toolExecutions) {
+		for (const execution of this.sourceTurn.toolExecutions) {
 			for (const [index, content] of (execution.result?.content ?? []).entries()) {
 				if (content.type === "image" && content.data && content.mimeType) {
 					activeKeys.add(`${execution.toolCallId}:${index}`);
@@ -159,7 +210,7 @@ export class TranscriptTurnComponent extends Container {
 		const capabilities = getCapabilities();
 		if (!this.showImages || !capabilities.images) return;
 
-		for (const execution of this.toolExecutions) {
+		for (const execution of this.sourceTurn.toolExecutions) {
 			for (const [index, content] of (execution.result?.content ?? []).entries()) {
 				if (content.type !== "image" || !content.data || !content.mimeType) continue;
 				const key = `${execution.toolCallId}:${index}`;
