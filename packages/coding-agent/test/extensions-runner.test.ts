@@ -8,7 +8,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
-import { createExtensionRuntime, discoverAndLoadExtensions, loadExtensions } from "../src/core/extensions/loader.ts";
+import { createEventBus } from "../src/core/event-bus.ts";
+import {
+	createExtensionRuntime,
+	discoverAndLoadExtensions,
+	loadExtensionFromFactory,
+	loadExtensions,
+} from "../src/core/extensions/loader.ts";
 import { ExtensionRunner, emitProjectTrustEvent } from "../src/core/extensions/runner.ts";
 import type {
 	ExtensionActions,
@@ -662,6 +668,155 @@ describe("ExtensionRunner", () => {
 				"second failure episode",
 			);
 			expect(errors).toHaveLength(2);
+		});
+
+		it("disposes transcript renderers safely, notifies changes, and falls through in load order", async () => {
+			const runtime = createExtensionRuntime();
+			let registerFirst: ((renderer: () => undefined) => () => void) | undefined;
+			let registerSecond: ((renderer: () => undefined) => () => void) | undefined;
+			const first = await loadExtensionFromFactory(
+				(pi) => {
+					registerFirst = pi.registerTranscriptTurnRenderer as unknown as (
+						renderer: () => undefined,
+					) => () => void;
+				},
+				tempDir,
+				createEventBus(),
+				runtime,
+				"<first>",
+			);
+			const second = await loadExtensionFromFactory(
+				(pi) => {
+					registerSecond = pi.registerTranscriptTurnRenderer as unknown as (
+						renderer: () => undefined,
+					) => () => void;
+				},
+				tempDir,
+				createEventBus(),
+				runtime,
+				"<second>",
+			);
+			if (!registerFirst || !registerSecond) throw new Error("Expected renderer registration APIs");
+			const disposeFirst = registerFirst(() => undefined);
+			const disposeSecond = registerSecond(() => undefined);
+			const runner = new ExtensionRunner([first, second], runtime, tempDir, sessionManager, modelRegistry);
+			let changes = 0;
+			const unsubscribe = runner.onTranscriptTurnRendererChange(() => {
+				changes += 1;
+			});
+
+			expect(runner.getTranscriptTurnRenderer()).toBeDefined();
+			disposeFirst();
+			expect(runner.getTranscriptTurnRenderer()).toBeDefined();
+			expect(changes).toBe(1);
+			disposeFirst();
+			expect(changes).toBe(1);
+
+			const replacement = registerSecond(() => undefined);
+			disposeSecond();
+			expect(runner.getTranscriptTurnRenderer()).toBeDefined();
+			expect(changes).toBe(2);
+			replacement();
+			expect(runner.getTranscriptTurnRenderer()).toBeUndefined();
+			expect(changes).toBe(3);
+			const restored = registerSecond(() => undefined);
+			expect(runner.getTranscriptTurnRenderer()).toBeDefined();
+			expect(changes).toBe(4);
+			restored();
+			expect(runner.getTranscriptTurnRenderer()).toBeUndefined();
+			expect(changes).toBe(5);
+			unsubscribe();
+		});
+
+		it("isolates transcript renderer change listener failures", async () => {
+			const runtime = createExtensionRuntime();
+			let register: ((renderer: () => undefined) => () => void) | undefined;
+			const extension = await loadExtensionFromFactory(
+				(pi) => {
+					register = pi.registerTranscriptTurnRenderer as unknown as (renderer: () => undefined) => () => void;
+				},
+				tempDir,
+				createEventBus(),
+				runtime,
+			);
+			const runner = new ExtensionRunner([extension], runtime, tempDir, sessionManager, modelRegistry);
+			const errors: Array<{ extensionPath: string; event: string; error: string; stack?: string }> = [];
+			runner.onError((error) => errors.push(error));
+			runner.onError(() => {
+				throw new Error("error listener boom");
+			});
+			const succeedingListener = vi.fn();
+			runner.onTranscriptTurnRendererChange(() => {
+				throw new Error("change listener boom");
+			});
+			runner.onTranscriptTurnRendererChange(succeedingListener);
+			if (!register) throw new Error("Expected transcript renderer registration API");
+
+			const dispose = register(() => undefined);
+			expect(runner.getTranscriptTurnRenderer()).toBeDefined();
+			expect(succeedingListener).toHaveBeenCalledOnce();
+			expect(errors).toHaveLength(1);
+			expect(errors[0]).toMatchObject({
+				extensionPath: "<runtime>",
+				event: "transcript_turn_renderer_change",
+				error: "change listener boom",
+			});
+			expect(errors[0]?.stack).toContain("change listener boom");
+
+			dispose();
+			expect(runner.getTranscriptTurnRenderer()).toBeUndefined();
+			expect(succeedingListener).toHaveBeenCalledTimes(2);
+			expect(errors).toHaveLength(2);
+		});
+
+		it("keeps a newer registration when the same renderer function's older disposer runs", async () => {
+			const runtime = createExtensionRuntime();
+			let register: ((renderer: () => undefined) => () => void) | undefined;
+			const extension = await loadExtensionFromFactory(
+				(pi) => {
+					register = pi.registerTranscriptTurnRenderer as unknown as (renderer: () => undefined) => () => void;
+				},
+				tempDir,
+				createEventBus(),
+				runtime,
+			);
+			const runner = new ExtensionRunner([extension], runtime, tempDir, sessionManager, modelRegistry);
+			let changes = 0;
+			runner.onTranscriptTurnRendererChange(() => {
+				changes += 1;
+			});
+			if (!register) throw new Error("Expected transcript renderer registration API");
+			const renderer = () => undefined;
+			const older = register(renderer);
+			const newer = register(renderer);
+			expect(changes).toBe(2);
+			older();
+			expect(runner.getTranscriptTurnRenderer()).toBeDefined();
+			expect(changes).toBe(2);
+			newer();
+			expect(runner.getTranscriptTurnRenderer()).toBeUndefined();
+			expect(changes).toBe(3);
+			newer();
+			expect(changes).toBe(3);
+		});
+
+		it("rejects a transcript renderer disposer captured from an invalidated runtime", async () => {
+			const runtime = createExtensionRuntime();
+			let dispose: (() => void) | undefined;
+			const extension = await loadExtensionFromFactory(
+				(pi) => {
+					dispose = (pi.registerTranscriptTurnRenderer as unknown as (renderer: () => undefined) => () => void)(
+						() => undefined,
+					);
+				},
+				tempDir,
+				createEventBus(),
+				runtime,
+			);
+			const runner = new ExtensionRunner([extension], runtime, tempDir, sessionManager, modelRegistry);
+			runner.invalidate("stale renderer runtime");
+			expect(dispose).toBeDefined();
+			expect(() => dispose?.()).toThrow("stale renderer runtime");
 		});
 
 		it("gets entry renderer by type", async () => {

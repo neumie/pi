@@ -206,6 +206,7 @@ export function createExtensionRuntime(): ExtensionRuntime {
 				message ??
 				"This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().";
 		},
+		notifyTranscriptTurnRendererChange: () => {},
 		// Pre-bind: queue registrations so bindCore() can flush them once the
 		// model registry is available. bindCore() replaces both with direct calls.
 		registerProvider: (name, config, extensionPath = "<unknown>") => {
@@ -296,9 +297,21 @@ function createExtensionAPI(
 			extension.entryRenderers.set(customType, renderer as EntryRenderer);
 		},
 
-		registerTranscriptTurnRenderer(renderer: TranscriptTurnRenderer): void {
+		registerTranscriptTurnRenderer(renderer: TranscriptTurnRenderer): () => void {
 			runtime.assertActive();
-			extension.transcriptTurnRenderer = renderer;
+			const registration: TranscriptTurnRenderer = (turn, options, rendererTheme) =>
+				renderer(turn, options, rendererTheme);
+			extension.transcriptTurnRenderer = registration;
+			runtime.notifyTranscriptTurnRendererChange();
+			let disposed = false;
+			return () => {
+				runtime.assertActive();
+				if (disposed) return;
+				disposed = true;
+				if (extension.transcriptTurnRenderer !== registration) return;
+				extension.transcriptTurnRenderer = undefined;
+				runtime.notifyTranscriptTurnRendererChange();
+			};
 		},
 
 		// Flag access - checks extension registered it, reads from runtime

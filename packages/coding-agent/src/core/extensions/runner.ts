@@ -159,6 +159,7 @@ type RunnerEmitResult<TEvent extends RunnerEmitEvent> = TEvent extends { type: "
 				: undefined;
 
 export type ExtensionErrorListener = (error: ExtensionError) => void;
+export type TranscriptTurnRendererChangeListener = () => void;
 
 export type NewSessionHandler = (options?: {
 	parentSession?: string;
@@ -274,6 +275,7 @@ export class ExtensionRunner {
 	private sessionManager: SessionManager;
 	private modelRegistry: ModelRegistry;
 	private errorListeners: Set<ExtensionErrorListener> = new Set();
+	private transcriptTurnRendererChangeListeners = new Set<TranscriptTurnRendererChangeListener>();
 	private failingTranscriptTurnRenderers = new Set<Extension>();
 	private getModel: () => Model<any> | undefined = () => undefined;
 	private getScopedModels: () => readonly ScopedModel[] = () => [];
@@ -310,6 +312,29 @@ export class ExtensionRunner {
 		this.cwd = cwd;
 		this.sessionManager = sessionManager;
 		this.modelRegistry = modelRegistry;
+		this.runtime.notifyTranscriptTurnRendererChange = () => {
+			for (const listener of this.transcriptTurnRendererChangeListeners) {
+				try {
+					listener();
+				} catch (error) {
+					if (!this.tryEmitTranscriptTurnRendererChangeError(error)) continue;
+				}
+			}
+		};
+	}
+
+	private tryEmitTranscriptTurnRendererChangeError(error: unknown): boolean {
+		try {
+			this.emitError({
+				extensionPath: "<runtime>",
+				event: "transcript_turn_renderer_change",
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			return true;
+		} catch {
+			return false;
+		}
 	}
 
 	bindCore(
@@ -547,6 +572,7 @@ export class ExtensionRunner {
 		if (!this.staleMessage) {
 			this.staleMessage = message;
 			this.runtime.invalidate(message);
+			this.transcriptTurnRendererChangeListeners.clear();
 		}
 	}
 
@@ -559,6 +585,11 @@ export class ExtensionRunner {
 	onError(listener: ExtensionErrorListener): () => void {
 		this.errorListeners.add(listener);
 		return () => this.errorListeners.delete(listener);
+	}
+
+	onTranscriptTurnRendererChange(listener: TranscriptTurnRendererChangeListener): () => void {
+		this.transcriptTurnRendererChangeListeners.add(listener);
+		return () => this.transcriptTurnRendererChangeListeners.delete(listener);
 	}
 
 	emitError(error: ExtensionError): void {

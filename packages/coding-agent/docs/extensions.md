@@ -1572,16 +1572,21 @@ Opt in to replacing visible non-user output between user messages with one exten
 
 The renderer receives the latest frame-coalesced snapshot while the turn is streaming and a final snapshot when it settles. Its turn is deeply detached: mutations never affect agent/session state, stock fallback, or native images. If visible data is unsupported, uncloneable, or exceeds Pi's best-effort estimated safety budget, Pi uses stock rendering for that update instead of exposing host-owned references. This estimate is not a hard CPU, memory, or resource-isolation boundary and cannot undo source allocation or engine-internal key enumeration. While it owns a turn, Pi suppresses the separate working indicator. The seam is TUI-only: it does not change session entries, model context, or non-TUI output. Pi keeps image content blocks outside the extension component and renders them through its native image component, preserving terminal image protocol ownership. If the renderer throws, Pi reports the selected extension path and cause through normal extension diagnostics, falls back to its default assistant/tool rendering, and still preserves native images. Repeated rebuilds during one uninterrupted failure report once.
 
-Only the first registered turn renderer is used, in extension load order. New and rebuilt components inherit the current global expansion state. On stock Pi versions that do not expose this API, extensions should feature-detect it and retain normal transcript rendering.
+Only the first registered turn renderer is used, in extension load order. Disposing that first registration can reveal the next registered renderer. New and rebuilt components inherit the current global expansion state. On stock Pi versions that do not expose this API, extensions should feature-detect it and retain normal transcript rendering.
+
+The call returns an idempotent disposer. Calling it unregisters that registration and rebuilds the TUI through the next active renderer, or through Pi's genuine stock transcript rows when none remains. Disposers captured before a reload or session replacement reject as stale.
 
 ```typescript
 import { Text } from "@earendil-works/pi-tui";
 
-pi.registerTranscriptTurnRenderer((turn, { expanded }, theme) => {
+const disposeTurnRenderer = pi.registerTranscriptTurnRenderer((turn, { expanded }, theme) => {
   const tools = turn.toolExecutions.map((tool) => tool.toolName).join(", ");
   const state = turn.isStreaming ? "working" : "done";
   return new Text(theme.fg("muted", `${state}: ${tools || "no tools"}`), 0, 0);
 });
+
+// Later, restore the next renderer or Pi's stock transcript.
+disposeTurnRenderer();
 ```
 
 ```typescript

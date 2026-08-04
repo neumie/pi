@@ -232,6 +232,7 @@ export interface ExtensionBindings {
 	abortHandler?: () => void;
 	shutdownHandler?: ShutdownHandler;
 	onError?: ExtensionErrorListener;
+	onTranscriptTurnRendererChange?: () => void;
 }
 
 /** Options for AgentSession.prompt() */
@@ -358,6 +359,8 @@ export class AgentSession {
 	private _extensionShutdownHandler?: ShutdownHandler;
 	private _extensionErrorListener?: ExtensionErrorListener;
 	private _extensionErrorUnsubscriber?: () => void;
+	private _transcriptTurnRendererChangeListener?: () => void;
+	private _transcriptTurnRendererChangeUnsubscriber?: () => void;
 
 	private _modelRuntime: ModelRuntime;
 
@@ -848,6 +851,8 @@ export class AgentSession {
 		this._extensionRunner.invalidate(
 			"This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().",
 		);
+		this._transcriptTurnRendererChangeUnsubscriber?.();
+		this._transcriptTurnRendererChangeUnsubscriber = undefined;
 		this._disconnectFromAgent();
 		this._eventListeners = [];
 		cleanupSessionResources(this.sessionId);
@@ -2245,6 +2250,9 @@ export class AgentSession {
 		if (bindings.onError !== undefined) {
 			this._extensionErrorListener = bindings.onError;
 		}
+		if (bindings.onTranscriptTurnRendererChange !== undefined) {
+			this._transcriptTurnRendererChangeListener = bindings.onTranscriptTurnRendererChange;
+		}
 
 		this._applyExtensionBindings(this._extensionRunner);
 		await this._extensionRunner.emit(this._sessionStartEvent);
@@ -2311,6 +2319,11 @@ export class AgentSession {
 		this._extensionErrorUnsubscriber?.();
 		this._extensionErrorUnsubscriber = this._extensionErrorListener
 			? runner.onError(this._extensionErrorListener)
+			: undefined;
+
+		this._transcriptTurnRendererChangeUnsubscriber?.();
+		this._transcriptTurnRendererChangeUnsubscriber = this._transcriptTurnRendererChangeListener
+			? runner.onTranscriptTurnRendererChange(this._transcriptTurnRendererChangeListener)
 			: undefined;
 	}
 
@@ -2600,8 +2613,9 @@ export class AgentSession {
 	}
 
 	async reload(options?: { beforeSessionStart?: () => void | Promise<void> }): Promise<void> {
-		const previousFlagValues = this._extensionRunner.getFlagValues();
-		await emitSessionShutdownEvent(this._extensionRunner, { type: "session_shutdown", reason: "reload" });
+		const previousRunner = this._extensionRunner;
+		const previousFlagValues = previousRunner.getFlagValues();
+		await emitSessionShutdownEvent(previousRunner, { type: "session_shutdown", reason: "reload" });
 		await this.settingsManager.reload();
 		this.syncQueueModesFromSettings();
 		resetApiProviders();
@@ -2611,12 +2625,16 @@ export class AgentSession {
 			flagValues: previousFlagValues,
 			includeAllExtensionTools: true,
 		});
+		previousRunner.invalidate(
+			"This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().",
+		);
 
 		const hasBindings =
 			this._extensionUIContext ||
 			this._extensionCommandContextActions ||
 			this._extensionShutdownHandler ||
-			this._extensionErrorListener;
+			this._extensionErrorListener ||
+			this._transcriptTurnRendererChangeListener;
 		if (hasBindings) {
 			await options?.beforeSessionStart?.();
 			await this._extensionRunner.emit({ type: "session_start", reason: "reload" });

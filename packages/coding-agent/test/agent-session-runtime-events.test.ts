@@ -18,6 +18,7 @@ import type {
 	SessionBeforeSwitchEvent,
 	SessionShutdownEvent,
 	SessionStartEvent,
+	TranscriptTurnRenderer,
 } from "../src/index.ts";
 
 type RecordedSessionEvent =
@@ -111,6 +112,28 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 
 		return { runtimeHost, faux };
 	}
+
+	it("rebinds transcript renderer change listeners after reload", async () => {
+		let registerRenderer: ((renderer: TranscriptTurnRenderer) => () => void) | undefined;
+		const { runtimeHost } = await createRuntimeHost((pi) => {
+			registerRenderer = pi.registerTranscriptTurnRenderer;
+			pi.registerTranscriptTurnRenderer(() => undefined);
+		});
+		let changes = 0;
+		await runtimeHost.session.bindExtensions({
+			onTranscriptTurnRendererChange: () => {
+				changes += 1;
+			},
+		});
+		if (!registerRenderer) throw new Error("Expected transcript renderer registration API");
+		const oldRegisterRenderer = registerRenderer;
+		const oldDisposer = oldRegisterRenderer(() => undefined);
+		await runtimeHost.session.reload();
+		expect(() => oldDisposer()).toThrow("This extension ctx is stale after session replacement or reload");
+		if (!registerRenderer) throw new Error("Expected transcript renderer registration API after reload");
+		registerRenderer(() => undefined);
+		expect(changes).toBe(2);
+	});
 
 	it("emits session_before_switch and session_start for new and resume flows", async () => {
 		const events: RecordedSessionEvent[] = [];

@@ -1863,6 +1863,9 @@ export class InteractiveMode {
 			onError: (error) => {
 				this.showExtensionError(error.extensionPath, error.error, error.stack);
 			},
+			onTranscriptTurnRendererChange: () => {
+				this.rebuildChatFromMessages();
+			},
 		});
 
 		setRegisteredThemes(this.session.resourceLoader.getThemes().themes);

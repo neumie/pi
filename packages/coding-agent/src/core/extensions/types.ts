@@ -1333,8 +1333,10 @@ export interface ExtensionAPI {
 	/**
 	 * Replace ordinary assistant/tool transcript rows with one component per user turn.
 	 * The renderer is TUI-only; it does not alter sessions, model context, or other modes.
+	 * Returns an idempotent disposer that restores the stock transcript when no other
+	 * extension renderer remains active.
 	 */
-	registerTranscriptTurnRenderer(renderer: TranscriptTurnRenderer): void;
+	registerTranscriptTurnRenderer(renderer: TranscriptTurnRenderer): () => void;
 
 	// =========================================================================
 	// Actions
@@ -1641,6 +1643,8 @@ export interface ExtensionRuntimeState {
 	assertActive: () => void;
 	/** Marks this extension instance as stale after runtime replacement or reload. */
 	invalidate: (message?: string) => void;
+	/** Notifies the active UI when transcript turn renderer registration changes. */
+	notifyTranscriptTurnRendererChange: () => void;
 	/**
 	 * Register or unregister a provider.
 	 *

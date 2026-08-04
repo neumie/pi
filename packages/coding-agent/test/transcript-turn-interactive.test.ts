@@ -364,6 +364,52 @@ describe("InteractiveMode transcript turns", () => {
 		expect(turnTwo.render(80)).toEqual([]);
 	});
 
+	test("renderer changes rebuild through session items and deactivate prior turn components", async () => {
+		const prototype = InteractiveMode.prototype as any;
+		const chatContainer = new Container();
+		const priorTurn = new TranscriptTurnComponent(() => new Text("summary", 0, 0), 1, false, 80, {
+			requestRender() {},
+		} as never);
+		chatContainer.addChild(priorTurn);
+		let bindings: { onTranscriptTurnRendererChange?: () => void } | undefined;
+		const items = [{ role: "user", content: "existing", timestamp: 1 }];
+		const renderSessionEntries = vi.fn();
+		const fakeThis: any = {
+			chatContainer,
+			transcriptTurnComponent: priorTurn,
+			transcriptTurnMessages: [],
+			transcriptCustomEntries: [],
+			transcriptToolExecutions: new Map(),
+			transcriptAssistantIndex: undefined,
+			transcriptTurnStreaming: false,
+			clearTranscriptTurn: vi.fn(),
+			clearChatContainer: prototype.clearChatContainer,
+			rebuildChatFromMessages: prototype.rebuildChatFromMessages,
+			sessionManager: { buildContextEntries: () => items },
+			renderSessionEntries,
+			createExtensionUIContext: () => ({}),
+			session: {
+				bindExtensions: async (value: { onTranscriptTurnRendererChange?: () => void }) => {
+					bindings = value;
+				},
+				resourceLoader: { getThemes: () => ({ themes: [] }) },
+				extensionRunner: {},
+			},
+			setupAutocompleteProvider: vi.fn(),
+			setupExtensionShortcuts: vi.fn(),
+			showLoadedResources: vi.fn(),
+			showStartupNoticesIfNeeded: vi.fn(),
+		};
+
+		await prototype.bindCurrentSessionExtensions.call(fakeThis);
+		expect(bindings?.onTranscriptTurnRendererChange).toBeDefined();
+		bindings?.onTranscriptTurnRendererChange?.();
+		expect(chatContainer.children).toEqual([]);
+		expect(priorTurn.render(80)).toEqual([]);
+		expect(renderSessionEntries).toHaveBeenCalledTimes(1);
+		expect(renderSessionEntries).toHaveBeenCalledWith(items);
+	});
+
 	test("normal chat clears deactivate pending image conversions", async () => {
 		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
 		let resolveConversion: (value: { data: string; mimeType: string } | undefined) => void = () => {};
