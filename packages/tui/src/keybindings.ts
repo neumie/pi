@@ -42,6 +42,8 @@ export interface Keybindings {
 	// Alternate-screen viewport navigation
 	"tui.altScreen.pageUp": true;
 	"tui.altScreen.pageDown": true;
+	"tui.altScreen.previousPrompt": true;
+	"tui.altScreen.nextPrompt": true;
 	"tui.altScreen.top": true;
 	"tui.altScreen.bottom": true;
 }
@@ -76,11 +78,11 @@ export const TUI_KEYBINDINGS = {
 		description: "Move cursor word right",
 	},
 	"tui.editor.cursorLineStart": {
-		defaultKeys: ["home", "ctrl+a"],
+		defaultKeys: ["home", "ctrl+home", "ctrl+a"],
 		description: "Move to line start",
 	},
 	"tui.editor.cursorLineEnd": {
-		defaultKeys: ["end", "ctrl+e"],
+		defaultKeys: ["end", "ctrl+end", "ctrl+e"],
 		description: "Move to line end",
 	},
 	"tui.editor.jumpForward": {
@@ -91,8 +93,8 @@ export const TUI_KEYBINDINGS = {
 		defaultKeys: "ctrl+alt+]",
 		description: "Jump backward to character",
 	},
-	"tui.editor.pageUp": { defaultKeys: "pageUp", description: "Page up" },
-	"tui.editor.pageDown": { defaultKeys: "pageDown", description: "Page down" },
+	"tui.editor.pageUp": { defaultKeys: ["pageUp", "ctrl+pageUp"], description: "Page up" },
+	"tui.editor.pageDown": { defaultKeys: ["pageDown", "ctrl+pageDown"], description: "Page down" },
 	"tui.editor.deleteCharBackward": {
 		defaultKeys: "backspace",
 		description: "Delete character backward",
@@ -136,10 +138,25 @@ export const TUI_KEYBINDINGS = {
 		defaultKeys: ["escape", "ctrl+c"],
 		description: "Cancel selection",
 	},
-	"tui.altScreen.pageUp": { defaultKeys: "shift+pageUp", description: "Scroll viewport up one page" },
-	"tui.altScreen.pageDown": { defaultKeys: "shift+pageDown", description: "Scroll viewport down one page" },
-	"tui.altScreen.top": { defaultKeys: "ctrl+home", description: "Scroll viewport to top" },
-	"tui.altScreen.bottom": { defaultKeys: "ctrl+end", description: "Scroll viewport to bottom" },
+	// These intentionally shadow the unmodified editor bindings in fullscreen mode.
+	"tui.altScreen.pageUp": {
+		defaultKeys: "pageUp",
+		description: "Scroll viewport up one page",
+	},
+	"tui.altScreen.pageDown": {
+		defaultKeys: "pageDown",
+		description: "Scroll viewport down one page",
+	},
+	"tui.altScreen.previousPrompt": {
+		defaultKeys: "ctrl+shift+up",
+		description: "Jump to previous semantic prompt",
+	},
+	"tui.altScreen.nextPrompt": {
+		defaultKeys: "ctrl+shift+down",
+		description: "Jump to next semantic prompt",
+	},
+	"tui.altScreen.top": { defaultKeys: "home", description: "Scroll viewport to top" },
+	"tui.altScreen.bottom": { defaultKeys: "end", description: "Scroll viewport to bottom" },
 } as const satisfies KeybindingDefinitions;
 
 export interface KeybindingConflict {
