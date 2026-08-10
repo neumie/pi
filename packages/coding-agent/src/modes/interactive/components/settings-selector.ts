@@ -16,8 +16,9 @@ import {
 import { formatHttpIdleTimeoutMs, HTTP_IDLE_TIMEOUT_CHOICES } from "../../../core/http-dispatcher.ts";
 import type {
 	DefaultProjectTrust,
+	FullscreenExitOutput,
 	MermaidRenderingMode,
-	UiMode,
+	TuiMode,
 	WarningSettings,
 } from "../../../core/settings-manager.ts";
 import {
@@ -86,7 +87,8 @@ export interface SettingsConfig {
 	defaultProjectTrust: DefaultProjectTrust;
 	clearOnShrink: boolean;
 	showTerminalProgress: boolean;
-	uiMode: UiMode;
+	tuiMode: TuiMode;
+	fullscreenExitOutput: FullscreenExitOutput;
 	fullscreenScrollbar: ScrollViewScrollbar;
 	warnings: WarningSettings;
 }
@@ -120,7 +122,8 @@ export interface SettingsCallbacks {
 	onDefaultProjectTrustChange: (defaultProjectTrust: DefaultProjectTrust) => void;
 	onClearOnShrinkChange: (enabled: boolean) => void;
 	onShowTerminalProgressChange: (enabled: boolean) => void;
-	onUiModeChange: (mode: UiMode) => void;
+	onTuiModeChange: (mode: TuiMode) => void;
+	onFullscreenExitOutputChange: (output: FullscreenExitOutput) => void;
 	onFullscreenScrollbarChange: (mode: ScrollViewScrollbar) => void;
 	onWarningsChange: (warnings: WarningSettings) => void;
 	onCancel: () => void;
@@ -630,11 +633,18 @@ export class SettingsSelectorComponent extends Container {
 					),
 			},
 			{
-				id: "ui-mode",
-				label: "UI mode",
+				id: "tui-mode",
+				label: "TUI mode",
 				description: "Interface layout; fullscreen mode is experimental",
-				currentValue: config.uiMode,
+				currentValue: config.tuiMode,
 				values: ["regular", "fullscreen"],
+			},
+			{
+				id: "fullscreen-exit-output",
+				label: "Fullscreen exit output",
+				description: "Print the transcript or only a session resume hint when exiting fullscreen mode",
+				currentValue: config.fullscreenExitOutput,
+				values: ["transcript", "resume-hint"],
 			},
 			{
 				id: "fullscreen-scrollbar",
@@ -855,8 +865,11 @@ export class SettingsSelectorComponent extends Container {
 					case "terminal-progress":
 						callbacks.onShowTerminalProgressChange(newValue === "true");
 						break;
-					case "ui-mode":
-						callbacks.onUiModeChange(newValue as UiMode);
+					case "tui-mode":
+						callbacks.onTuiModeChange(newValue as TuiMode);
+						break;
+					case "fullscreen-exit-output":
+						callbacks.onFullscreenExitOutputChange(newValue as FullscreenExitOutput);
 						break;
 					case "fullscreen-scrollbar":
 						callbacks.onFullscreenScrollbarChange(newValue as ScrollViewScrollbar);

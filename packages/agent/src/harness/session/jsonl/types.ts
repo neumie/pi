@@ -3,12 +3,13 @@ import type { JsonValue, SessionCreateOptions, SessionMetadata } from "../types.
 
 export type JsonlSessionRepoFileSystem = Pick<
 	FileSystem,
-	| "cwd"
 	| "absolutePath"
 	| "joinPath"
 	| "readTextFile"
+	| "readTextLines"
 	| "writeFile"
 	| "appendFile"
+	| "renameFile"
 	| "fileInfo"
 	| "listDir"
 	| "exists"
@@ -18,8 +19,8 @@ export type JsonlSessionRepoFileSystem = Pick<
 
 export interface JsonlSessionRepoOptions {
 	fs: JsonlSessionRepoFileSystem;
+	/** Root containing coding-agent-compatible cwd-encoded session directories. */
 	sessionsRoot: string;
-	cwd?: string;
 }
 
 export interface JsonlSessionMetadata extends SessionMetadata {

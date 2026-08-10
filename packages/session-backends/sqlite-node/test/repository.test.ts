@@ -188,6 +188,21 @@ END;
 		expect(counts.closes).toBe(1);
 	});
 
+	it("closes active sessions when the repository is disposed", async () => {
+		const root = createTempDir();
+		const databasePath = join(root, "sessions.sqlite");
+		const env = new NodeExecutionEnv({ cwd: root });
+		await using repo = new SqliteSessionRepository({ env, sqlite: createNodeSqliteFactory(), databasePath });
+		const session = await repo.create({ cwd: root, id: "session-1" });
+
+		await repo[Symbol.asyncDispose]();
+
+		await expect(session.appendMessage(createUserMessage("late"))).rejects.toMatchObject({
+			code: "storage",
+			message: expect.stringContaining("SQLite session session-1 is closed"),
+		});
+	});
+
 	it("retains one connection for repeated session operations", async () => {
 		const root = createTempDir();
 		const databasePath = join(root, "sessions.sqlite");
@@ -260,7 +275,6 @@ END;
 	it.each([
 		["invalid JSON", "not json", "name is not valid JSON"],
 		["a non-string value", "{}", "name must be a string"],
-		["a NULL value", null, "name must be a string"],
 	])("rejects stored session names containing %s", async (_case, stored, message) => {
 		const root = createTempDir();
 		const databasePath = join(root, "sessions.sqlite");
@@ -285,6 +299,26 @@ END;
 			code: "storage",
 			message: expect.stringContaining(message),
 		});
+	});
+
+	it("omits a cleared session name from metadata", async () => {
+		const root = createTempDir();
+		const databasePath = join(root, "sessions.sqlite");
+		const env = new NodeExecutionEnv({ cwd: root });
+		await using repo = new SqliteSessionRepository({
+			env,
+			sqlite: createNodeSqliteFactory(),
+			databasePath,
+		});
+		const session = await repo.create({ cwd: root, id: "session-1" });
+		await session.setName("Temporary");
+		expect(await session.getMetadata()).toMatchObject({ name: "Temporary" });
+
+		await session.setName(undefined);
+
+		expect(await session.getName()).toBeUndefined();
+		expect(await session.getMetadata()).not.toHaveProperty("name");
+		expect((await repo.list())[0]).not.toHaveProperty("name");
 	});
 
 	it("fails loudly when a stored entry is read and cannot be decoded", async () => {
